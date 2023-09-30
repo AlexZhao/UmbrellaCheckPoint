@@ -1,0 +1,362 @@
+--- linux-6.5.2/fs/binfmt_elf.c	2023-09-07 04:22:26.000000000 +0800
++++ linux-6.5.2-umbrella/fs/binfmt_elf.c	2023-09-30 14:04:08.989275603 +0800
+@@ -50,6 +50,18 @@
+ #include <asm/param.h>
+ #include <asm/page.h>
+ 
++/* ELF_SIGN */
++#ifdef CONFIG_ELF_SIGN
++#include <crypto/hash.h>
++#include <crypto/sig.h>
++#include <crypto/public_key.h>
++#include <linux/key-type.h>
++#include <keys/asymmetric-type.h>
++#include <linux/elf-sign.h>
++#include <linux/keyctl.h>
++#include <crypto/akcipher.h>
++#endif
++
+ #ifndef ELF_COMPAT
+ #define ELF_COMPAT 0
+ #endif
+@@ -820,6 +832,269 @@ static int parse_elf_properties(struct f
+ 	return ret == -ENOENT ? 0 : ret;
+ }
+ 
++#ifdef CONFIG_ELF_SIGN
++/* ELF_SIGN */
++static char *elf_sign_pub_key __ro_after_init = NULL;
++static int __init setup_elf_sign_pub(char *str) {
++	elf_sign_pub_key = str;
++	pr_info("elf_sign_pub_key = %s\n", elf_sign_pub_key);
++
++	return 1;
++}
++__setup("elf_sign_pub=", setup_elf_sign_pub);
++
++static char *elf_sign __ro_after_init = NULL;
++static int __init setup_elf_sign(char *str) {
++	elf_sign = str;
++
++	pr_info("elf_sign folder %s\n", elf_sign);
++
++	return 1;
++}
++__setup("elf_sign=", setup_elf_sign);
++
++
++/*
++ * Userspace ELF can comes from different binaries which based on its 
++ * defined certs public key.
++ * The public key need to base on X509 which need to be verified by 
++ * elf_sign_pub_key which is ELF root key 
++ */
++static struct file *verify_cert_chain(const char *cert_filename) {
++
++	return NULL;
++}
++
++extern struct key_type *key_type_lookup(const char *type);
++extern void key_type_put(struct key_type *ktype);
++extern int software_key_determine_akcipher(const struct public_key *pkey,
++				const char *encoding, const char *hash_algo,
++				char alg_name[CRYPTO_MAX_ALG_NAME], bool *sig,
++				enum kernel_pkey_operation op);
++
++static inline u8 *bin_pkey_pack_u32(u8 *dst, u32 val)
++{
++	memcpy(dst, &val, sizeof(val));
++	return dst + sizeof(val);
++}
++
++static elf_sign_verify_status_t verify_elf_signature(struct file *elf_file, struct elf_phdr *pt_sign_hdr, elf_sign_verify_status_t verify_status) {
++	struct file *pubkf = NULL;
++	struct crypto_sig *tfm = NULL;
++	struct crypto_shash *hashtfm = NULL;
++	struct shash_desc *desc = NULL;
++	int ret = -EINVAL;
++	size_t desc_size = 0;
++	char *digest = NULL;
++	int digest_size = 0;
++	size_t sig_len = 0;
++	char *elf_sig = NULL;
++	size_t pubk_size = 0;
++	void *pubk = NULL;
++	struct key_preparsed_payload *key_payload = NULL;
++	struct public_key *pkey = NULL;
++	u8 *key = NULL, *ptr = NULL;
++	void *data_ptr = NULL;
++
++	if (pt_sign_hdr->p_filesz > 4096 * 2) {
++		ret = -E2BIG;
++		goto err_out;
++	}
++
++	elf_sig = kmalloc(pt_sign_hdr->p_filesz, GFP_KERNEL);
++	if (!elf_sig) {
++		ret = -ENOMEM;
++		goto err_out;
++	}
++
++	ret = elf_read(elf_file, elf_sig, pt_sign_hdr->p_filesz, pt_sign_hdr->p_offset);
++	if (ret < 0) {
++		goto err_free_out;
++	}
++
++	sig_len = pt_sign_hdr->p_filesz;
++
++	// generate digest
++	hashtfm = crypto_alloc_shash("sha256", 0, 0);
++	if (IS_ERR(hashtfm)) {
++		ret = -EINVAL;
++		goto err_free_out;
++	}
++
++	desc_size = crypto_shash_descsize(hashtfm) + sizeof(*desc);
++	desc = kzalloc(desc_size, GFP_KERNEL);
++	if (!desc) {
++		ret = -ENOMEM;
++		goto err_free_out;
++	}
++	desc->tfm = hashtfm;
++
++	digest_size = crypto_shash_digestsize(hashtfm);
++	ret = crypto_shash_init(desc);
++	if (ret < 0) {
++		ret = -EINVAL;
++		goto err_free_out;
++	}
++
++	digest = kzalloc(digest_size, GFP_KERNEL);
++	if (!digest) {
++		ret = -ENOMEM;
++		goto err_free_out;
++	}
++
++	data_ptr = kzalloc(sizeof(struct elfhdr), GFP_KERNEL);
++	if (!data_ptr) {
++		ret = -ENOMEM;
++		goto err_free_out;
++	}
++
++	elf_read(elf_file, data_ptr, sizeof(struct elfhdr), 0);
++	struct elfhdr *hdr = data_ptr;
++	hdr->e_shoff = 0;  // set the entry to 0 to calc the SHA
++
++	ret = crypto_shash_update(desc, data_ptr, sizeof(struct elfhdr));
++	if (ret) 
++		goto err_free_out;
++
++	ret = crypto_shash_final(desc, digest);
++	if (ret) 
++		goto err_free_out;
++
++	pr_devel("%s:%d generate digest correct with length %d\n", __func__, __LINE__, digest_size);
++
++	// verify cert chain first
++	ret = -EINVAL;
++	pubkf = filp_open(elf_sign_pub_key, O_RDONLY, 0);
++	if (IS_ERR(pubk)) 
++		goto err_free_out;
++	
++	pubk_size = pubkf->f_inode->i_size;
++	if (pubk_size == 0 || pubk_size > 4096)
++		goto err_free_out;
++
++	pubk = kmalloc(pubk_size, GFP_KERNEL);
++	if (!pubk) {
++		ret = -ENOMEM;
++		goto err_close_pubk;
++	}
++
++	loff_t pos = 0;
++	ret = kernel_read(pubkf, pubk, pubk_size, &pos);
++	if (ret < 0 || ret != pubk_size) {
++		ret = -EIO;
++		goto err_close_pubk;
++	}
++
++	struct key_type *asym_key = key_type_lookup("asymmetric");
++	if (asym_key) {
++		key_payload = kzalloc(sizeof(struct key_preparsed_payload), GFP_KERNEL);
++		if (!key_payload) {
++			ret = -ENOMEM;
++			goto err_key_type_put;
++		}
++
++		key_payload->orig_description = NULL;
++		key_payload->description = NULL;
++		key_payload->data = pubk;
++		key_payload->datalen = pubk_size;
++		key_payload->quotalen = asym_key->def_datalen;
++		key_payload->expiry = TIME64_MAX;
++
++		ret = asym_key->preparse(key_payload);
++		if (ret)
++			goto err_key_type_put;
++
++		pkey = key_payload->payload.data[asym_crypto];
++
++		key = kmalloc(pkey->keylen + sizeof(u32) * 2 + pkey->paramlen, GFP_KERNEL);
++		if (!key) {
++			ret = -ENOMEM;
++			goto err_key_type_put;
++		}
++
++		memcpy(key, pkey->key, pkey->keylen);
++		ptr = key + pkey->keylen;
++		ptr = bin_pkey_pack_u32(ptr, pkey->algo);
++		ptr = bin_pkey_pack_u32(ptr, pkey->paramlen);
++		memcpy(ptr, pkey->params, pkey->paramlen);
++	} else 
++		goto err_close_pubk;
++
++	pr_devel("%s:%d loaded asymmetric key_type and parsed the public key  %s\n", __func__, __LINE__, pkey->pkey_algo);
++
++	char alg_name[CRYPTO_MAX_ALG_NAME];
++	bool issig = false;
++	ret = software_key_determine_akcipher(pkey, "pkcs1",
++					      "sha256", alg_name,
++					      &issig, kernel_pkey_verify);
++	
++	tfm = crypto_alloc_sig(alg_name, 0, 0);
++	if (IS_ERR(tfm))
++		goto err_key_type_put;
++
++	ret = crypto_sig_set_pubkey(tfm, key, pkey->keylen);
++	if (ret)
++		goto err_key_type_put;
++
++	ret = crypto_sig_verify(tfm, elf_sig, sig_len, digest, digest_size);
++	if (ret)
++		goto err_key_type_put;
++
++	ret = 0;
++	pr_devel("%s:%d verified signature %d, passed\n", __func__, __LINE__, ret);
++
++err_key_type_put:
++	if (asym_key) {
++		if (key_payload)
++			asym_key->free_preparse(key_payload);
++	}
++	key_type_put(asym_key);
++
++err_close_pubk:
++	filp_close(pubkf, NULL);
++
++err_free_out:
++	if (tfm)
++		crypto_free_sig(tfm);
++
++	if (key)
++		kfree(key);
++
++	if (key_payload)
++		kfree(key_payload);
++
++	if (pubk)
++		kfree(pubk);
++
++	if (data_ptr)
++		kfree(data_ptr);
++
++	if (digest)
++		kfree(digest);
++
++	if (desc)
++		kfree(desc);
++
++	if (hashtfm)
++		crypto_free_shash(hashtfm);
++
++	if (elf_sig)
++		kfree(elf_sig);
++
++err_out:
++	if (ret) {
++		if (verify_status == ELF_SIGN_NOT_VERIFIED)
++			return ELF_SIGN_VERIFY_CERTS_FAILED;
++		else if (verify_status == ELF_SIGN_NOT_VERIFIED_INTERP)
++			return ELF_SIGN_VERIFY_INTERP_CERTS_FAILED;
++	
++		return ELF_SIGN_VERIFY_CERTS_FAILED;
++	} else {
++		return ELF_SIGN_VERIFY_PASS;
++	}
++}
++#endif
++
+ static int load_elf_binary(struct linux_binprm *bprm)
+ {
+ 	struct file *interpreter = NULL; /* to shut gcc up */
+@@ -861,6 +1136,31 @@ static int load_elf_binary(struct linux_
+ 	if (!elf_phdata)
+ 		goto out;
+ 
++	/* ELF_SIGN */
++#ifdef CONFIG_ELF_SIGN
++	elf_ppnt = elf_phdata;
++	elf_sign_verify_status_t verify_status = ELF_SIGN_NOT_VERIFIED;
++	for (i = 0; i < elf_ex->e_phnum; i++, elf_ppnt++)
++		if (elf_ppnt->p_type == PT_SIGN) {
++			verify_status = verify_elf_signature(bprm->file, elf_ppnt, verify_status);
++			if (verify_status != ELF_SIGN_VERIFY_PASS) {
++				retval = security_bprm_elf_sign(bprm->file, verify_status);
++				if (retval != 0)
++					goto out_free_ph;
++				else 
++					break;
++			} else 
++				break;
++		} else
++			continue;
++	
++	if (verify_status == ELF_SIGN_NOT_VERIFIED) {
++		retval = security_bprm_elf_sign(bprm->file, verify_status);
++		if (retval != 0)
++			goto out_free_ph;
++	}
++#endif
++
+ 	elf_ppnt = elf_phdata;
+ 	for (i = 0; i < elf_ex->e_phnum; i++, elf_ppnt++) {
+ 		char *elf_interpreter;
+@@ -881,6 +1181,7 @@ static int load_elf_binary(struct linux_
+ 		if (elf_ppnt->p_filesz > PATH_MAX || elf_ppnt->p_filesz < 2)
+ 			goto out_free_ph;
+ 
++		// Out of mem attack by modify interpreter ...
+ 		retval = -ENOMEM;
+ 		elf_interpreter = kmalloc(elf_ppnt->p_filesz, GFP_KERNEL);
+ 		if (!elf_interpreter)
+@@ -962,6 +1263,30 @@ out_free_interp:
+ 		if (!interp_elf_phdata)
+ 			goto out_free_dentry;
+ 
++#ifdef CONFIG_ELF_SIGN
++		elf_ppnt = interp_elf_phdata;
++		elf_sign_verify_status_t verify_status = ELF_SIGN_NOT_VERIFIED_INTERP;
++		for (i = 0; i < interp_elf_ex->e_phnum; i++, elf_ppnt++)
++			if (elf_ppnt->p_type == PT_SIGN) {
++				verify_status = verify_elf_signature(bprm->file, elf_ppnt, verify_status);
++				if (verify_status != ELF_SIGN_VERIFY_PASS) {
++					retval = security_bprm_elf_sign(interpreter, verify_status);
++					if (retval != 0)
++						goto out_free_dentry;
++					else
++						break;
++				} else 
++					break;				
++			} else 
++				continue;
++		
++		if (verify_status == ELF_SIGN_NOT_VERIFIED_INTERP) {
++			retval = security_bprm_elf_sign(interpreter, verify_status);
++			if (retval != 0)
++				goto out_free_dentry;
++		}
++#endif
++
+ 		/* Pass PT_LOPROC..PT_HIPROC headers to arch code */
+ 		elf_property_phdata = NULL;
+ 		elf_ppnt = interp_elf_phdata;

@@ -1,5 +1,24 @@
 /* elfsign.c -- Signing the compiled ELF with private key.
-   Author: Zhao Zhe (Alex), zhe.alex.zhao@gmail.com */
+   Author: Zhao Zhe (Alex), zhe.alex.zhao@gmail.com
+
+   Copyright (C) 1991-2023 Free Software Foundation, Inc.
+
+   This file is part of GNU Binutils.
+
+   This program is free software; you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program; if not, write to the Free Software
+   Foundation, Inc., 51 Franklin Street - Fifth Floor, Boston, MA
+   02110-1301, USA.  */
 #include "sysdep.h"
 #include "bfd.h"
 #include "libiberty.h"
@@ -17,6 +36,8 @@
 /* OpenSSL relevant SHA and RSA sign */
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <openssl/engine.h>
+#include <openssl/err.h>
 
 extern char *program_name;
 
@@ -63,85 +84,92 @@ static struct option options[] = {
  */
 static int calculate_sign_section(bfd *obfd, char *signature, size_t len, const char *priv_key)
 {
-    EVP_MD_CTX *ctx;
-    EVP_PKEY *pkey;
+    EVP_MD_CTX *ctx = NULL;
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *pctx = NULL;
     Elf_Internal_Ehdr *ehdr = elf_elfheader(obfd);
-    int digest_len = 0;
+    unsigned int digest_len = 0;
     FILE *key = NULL;
-    char error_str[256];
+    int ret = 1;
+    void *tmp = NULL;
+    void *digest = NULL;
 
-    if (ehdr == NULL) {
-        printf("Not able to get ehdr");
+    if (ehdr == NULL) 
         goto err;
-    }
 
     key = fopen(priv_key, "r");
-    if (key == NULL) {
-        printf("No private key existed at %s\n", priv_key);
+    if (key == NULL)
         goto err;
-    }
 
     pkey = PEM_read_PrivateKey(key, NULL, NULL, NULL);
-    if (pkey == NULL) {
-        printf("Not able to load private key at %s\n", priv_key);
+    if (pkey == NULL)
         goto err_close_key;
-    }
 
     ctx = EVP_MD_CTX_new();
-    if (ctx == NULL) {
-        printf("Get EVP MD CTX failed\n");
+    if (ctx == NULL) 
         goto err_close_key;
-    }
 
-    if (EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, pkey) == 0) {
-        printf("Get DigestInit\n");
+    if (EVP_DigestInit(ctx, EVP_sha256()) == 0)
         goto err_free_ctx;
-    }
 
-    if (EVP_DigestSignUpdate(ctx, ehdr, sizeof(Elf_Internal_Ehdr)) == 0) {
-        printf("Get DigestUpdate\n");
-        goto err_close_key;
-    }
-
-    if (EVP_DigestSignFinal(ctx, NULL, &digest_len) == 0) {
-        printf("Get Digest Failed %s\n", ERR_error_string_n(ERR_get_error(), error_str, sizeof(error_str)));
+    if (EVP_DigestUpdate(ctx, ehdr, sizeof(Elf_Internal_Ehdr)) == 0)
         goto err_free_ctx;
-    }
 
-    void *tmp = NULL;
-    tmp = OPENSSL_malloc(digest_len);
-    if (tmp == NULL) {
+    digest = OPENSSL_malloc(256);
+    if (digest == NULL)
         goto err_free_ctx;
-    }
 
-    if (EVP_DigestSignFinal(ctx, tmp, &digest_len) == 0) {
-        OPENSSL_free(tmp);
+    if (EVP_DigestFinal(ctx, digest, &digest_len) == 0)
         goto err_free_ctx;
-    }
 
-    if (len != digest_len) {
-        OPENSSL_free(tmp);
-        printf("Get aligned signature compared to configured SHA256\n");
+    pctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!pctx)
         goto err_free_ctx;
-    }
-    memcpy(signature, tmp, digest_len);
 
+    size_t sig_len = 0;
+    EVP_PKEY_sign_init(pctx);
 
-    OPENSSL_free(tmp);
-    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING);
 
-    printf("Digest length of the signature %d\n", digest_len);
+    EVP_PKEY_CTX_set_signature_md(pctx, EVP_sha256());
+    
+    EVP_PKEY_sign(pctx, NULL, &sig_len, digest, digest_len);
 
-    return 0;
+    tmp = OPENSSL_malloc(sig_len);
+    if (tmp == NULL)
+        goto err_free_ctx;
+
+    EVP_PKEY_sign(pctx, tmp, &sig_len, digest, digest_len);
+
+    if (len != sig_len)
+        goto err_free_ctx;
+
+    memcpy(signature, tmp, sig_len);
+
+    ret = 0;
 
 err_free_ctx:
-    EVP_MD_CTX_free(ctx);
+    if (tmp)
+        OPENSSL_free(tmp);
+
+    if (pctx)
+        EVP_PKEY_CTX_free(pctx);
+
+    if (digest)
+        OPENSSL_free(digest);
+
+    if (ctx)
+        EVP_MD_CTX_free(ctx);
+
+    if (pkey)
+        OPENSSL_free(pkey);
 
 err_close_key:
-    fclose(key);
+    if (key)
+        fclose(key);
 
 err:
-    return 1;
+    return ret;
 }
 
 /*
@@ -276,7 +304,6 @@ static void
 copy_section (bfd *ibfd, sec_ptr isection, void *obfdarg)
 {
     bfd *obfd = (bfd *) obfdarg;
-    struct section_list *p;
     sec_ptr osection;
     bfd_size_type size;
 
@@ -319,10 +346,10 @@ copy_section (bfd *ibfd, sec_ptr isection, void *obfdarg)
  *  with modified BFD
  *
  */
-static struct ascetion* add_sign_section(bfd *ibfd, bfd *obfd, size_t sign_len)
+static struct bfd_section* add_sign_section(bfd *obfd, size_t sign_len)
 {
-    struct ascetion **sign_section = NULL;
-    struct ascetion *section = NULL;
+    struct bfd_section **sign_section = NULL;
+    struct bfd_section *section = NULL;
     flagword flags;
     flags = SEC_HAS_CONTENTS | SEC_READONLY | SEC_DATA;
 
@@ -333,11 +360,11 @@ static struct ascetion* add_sign_section(bfd *ibfd, bfd *obfd, size_t sign_len)
     }
 
     if (!bfd_set_section_size (section, sign_len)) {
-        bfd_nonfatal_message (NULL, obfd, sign_section, NULL);
+        bfd_nonfatal_message (NULL, obfd, section, NULL);
         return NULL;
     }
 
-    sign_section = xmalloc(sizeof(struct ascetion *));
+    sign_section = xmalloc(sizeof(struct bfd_section *));
     *sign_section = section;
 
     bfd_record_phdr (obfd, PT_SIGN, 0, 0, 0, 0, 0, 0, 1, sign_section);
@@ -369,22 +396,19 @@ static bool setup_bfd_headers (bfd *ibfd, bfd *obfd)
 static int sign_file(const char *input_elf, const char *private_key, const char *output_elf)
 {
     struct stat statbuf;
-    FILE *private_key_file;
     const char* input_target = NULL;
     const char* output_target = NULL;
     char *signature = NULL;
     size_t sign_len = 256;
     bfd *ibfd = NULL;
     bfd *obfd = NULL;
-    struct ascetion *sign_section = NULL;
+    struct bfd_section *sign_section = NULL;
     enum bfd_architecture iarch;
     unsigned int imach;
     bfd_vma start;
     char **obj_matching;
     long symcount;
     long symsize;
-
-    printf("Sign ELF %s with key %s to generate %s\n", input_elf, private_key, output_elf);
 
     ibfd = bfd_openr (input_elf, input_target);
     if (ibfd == NULL || bfd_stat (ibfd, &statbuf) != 0) {
@@ -404,8 +428,6 @@ static int sign_file(const char *input_elf, const char *private_key, const char 
             bfd_close (ibfd);
             return 1;
         }
-
-        printf("%s:%d and input type %d\n", __func__, __LINE__, bfd_get_format (ibfd));
 
         if (ibfd->xvec->byteorder != obfd->xvec->byteorder
             && ibfd->xvec->byteorder != BFD_ENDIAN_UNKNOWN
@@ -498,7 +520,7 @@ static int sign_file(const char *input_elf, const char *private_key, const char 
            any output is done.  Thus, we traverse all sections multiple times.  */
         bfd_map_over_sections (ibfd, setup_section, obfd);
 
-        sign_section = add_sign_section (ibfd, obfd, sign_len);
+        sign_section = add_sign_section (obfd, sign_len);
 
         if (setup_bfd_headers (ibfd, obfd) != true)
             return 1;
@@ -517,7 +539,8 @@ static int sign_file(const char *input_elf, const char *private_key, const char 
         signature = malloc(sign_len);
         memset(signature, 0x00, sign_len);
 
-        calculate_sign_section(obfd, signature, sign_len, private_key);
+        if (calculate_sign_section(obfd, signature, sign_len, private_key))
+            return 1;
 
         /* Setup the contents of obfd */
         if (! bfd_set_section_contents (obfd, sign_section, (const void *)signature, 0, sign_len)) {
@@ -601,5 +624,10 @@ int main(int argc, char *argv[])
     }
 
     status = sign_file(input_elf, private_key, output_elf);
+    if (status)
+        printf("Failed sign ELF %s with private key %s\n", input_elf, private_key);
+    else
+        printf("Success sign ELF %s with private key %s\n", input_elf, private_key);
+
     return status;
 }
