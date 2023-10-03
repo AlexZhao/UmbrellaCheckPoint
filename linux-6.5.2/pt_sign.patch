@@ -156,7 +156,7 @@
 +	// verify cert chain first
 +	ret = -EINVAL;
 +	pubkf = filp_open(elf_sign_pub_key, O_RDONLY, 0);
-+	if (IS_ERR(pubk)) 
++	if (IS_ERR(pubkf)) 
 +		goto err_free_out;
 +	
 +	pubk_size = pubkf->f_inode->i_size;

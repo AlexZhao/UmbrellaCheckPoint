@@ -1,0 +1,5044 @@
+--- glibc-2.38/elf/dl-load.c	2023-08-01 01:54:16.000000000 +0800
++++ glibc-2.38-umbrella/elf/dl-load.c	2023-10-03 20:38:06.213548310 +0800
+@@ -942,6 +942,7 @@
+ 			struct link_map *loader, int l_type, int mode,
+ 			void **stack_endp, Lmid_t nsid)
+ {
++  _dl_error_printf("%s:%d Map object to memory space from fd %s\n", __func__, __LINE__, name);
+   struct link_map *l = NULL;
+   const ElfW(Ehdr) *header;
+   const ElfW(Phdr) *phdr;
+@@ -1546,7 +1547,7 @@
+ 	    *endp = '\0';
+ #endif
+ 
+-	    _dl_debug_printf_c (first ? "%s" : ":%s", buf);
++	    _dl_debug_printf (first ? "%s" : ":%s", buf);
+ 	    first = 0;
+ 	  }
+ 
+@@ -1554,11 +1555,4953 @@
+     }
+ 
+   if (name != NULL)
+-    _dl_debug_printf_c ("\t\t(%s from file %s)\n", what,
++    _dl_debug_printf ("\t\t(%s from file %s)\n", what,
+ 			DSO_FILENAME (name));
+   else
+-    _dl_debug_printf_c ("\t\t(%s)\n", what);
++    _dl_debug_printf ("\t\t(%s)\n", what);
+ }
++
++#define PT_SIGN                      0x10000000   
++
++/* Hacked Invoke security controlling */
++#define ARCH_DYN_LINK_VERIFY         0x8001
++#define ARCH_CRITICAL_ENTER          0x8002
++#define ARCH_CRITICAL_EXIT           0x8003 
++
++extern int arch_prctl (int code, uintptr_t *addr);
++
++/* Copied SHA and RSA from kernel code */
++#define SHA256_DIGEST_SIZE      32
++#define SHA256_BLOCK_SIZE       64
++
++#define SHA256_H0	0x6a09e667UL
++#define SHA256_H1	0xbb67ae85UL
++#define SHA256_H2	0x3c6ef372UL
++#define SHA256_H3	0xa54ff53aUL
++#define SHA256_H4	0x510e527fUL
++#define SHA256_H5	0x9b05688cUL
++#define SHA256_H6	0x1f83d9abUL
++#define SHA256_H7	0x5be0cd19UL
++
++typedef uint64_t u64;
++typedef uint32_t u32;
++typedef uint16_t u16;
++typedef uint8_t u8;
++typedef u64 be64;
++typedef u32 be32;
++typedef u16 be16;
++typedef u64 time64_t;
++
++struct sha256_state {
++	u32 state[SHA256_DIGEST_SIZE / 4];
++	u64 count;
++	u8 buf[SHA256_BLOCK_SIZE];
++};
++
++typedef void (sha256_block_fn)(struct sha256_state *sst, u8 const *src,
++			       int blocks);
++
++static inline void sha256_init(struct sha256_state *sctx)
++{
++	sctx->state[0] = SHA256_H0;
++	sctx->state[1] = SHA256_H1;
++	sctx->state[2] = SHA256_H2;
++	sctx->state[3] = SHA256_H3;
++	sctx->state[4] = SHA256_H4;
++	sctx->state[5] = SHA256_H5;
++	sctx->state[6] = SHA256_H6;
++	sctx->state[7] = SHA256_H7;
++	sctx->count = 0;
++}
++
++static const u32 SHA256_K[] = {
++	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
++	0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++	0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
++	0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
++	0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++	0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++	0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
++	0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
++	0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
++};
++
++static inline u32 Ch(u32 x, u32 y, u32 z)
++{
++	return z ^ (x & (y ^ z));
++}
++
++static inline u32 Maj(u32 x, u32 y, u32 z)
++{
++	return (x & y) | (z & (x | y));
++}
++
++/**
++ * ror32 - rotate a 32-bit value right
++ * @word: value to rotate
++ * @shift: bits to roll
++ */
++static inline u32 ror32(u32 word, unsigned int shift)
++{
++	return (word >> (shift & 31)) | (word << ((-shift) & 31));
++}
++
++#define e0(x)       (ror32(x, 2) ^ ror32(x, 13) ^ ror32(x, 22))
++#define e1(x)       (ror32(x, 6) ^ ror32(x, 11) ^ ror32(x, 25))
++#define s0(x)       (ror32(x, 7) ^ ror32(x, 18) ^ (x >> 3))
++#define s1(x)       (ror32(x, 17) ^ ror32(x, 19) ^ (x >> 10))
++
++static inline uint32_t __get_unaligned_be32(const uint8_t *p)
++{
++	return p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3];
++}
++
++static inline uint32_t get_unaligned_be32(const void *p)
++{
++	return __get_unaligned_be32((const uint8_t *)p);
++}
++
++static inline void __put_unaligned_be16(uint16_t val, uint8_t *p)
++{
++	*p++ = val >> 8;
++	*p++ = val;
++}
++
++static inline void __put_unaligned_be32(uint32_t val, uint8_t *p)
++{
++	__put_unaligned_be16(val >> 16, p);
++	__put_unaligned_be16(val, p + 2);
++}
++
++
++static inline void put_unaligned_be32(uint32_t val, void *p)
++{
++	__put_unaligned_be32(val, p);
++}
++
++static inline void LOAD_OP(int I, u32 *W, const u8 *input)
++{
++	W[I] = get_unaligned_be32((u32 *)input + I);
++}
++
++static inline void BLEND_OP(int I, u32 *W)
++{
++	W[I] = s1(W[I-2]) + W[I-7] + s0(W[I-15]) + W[I-16];
++}
++
++#define SHA256_ROUND(i, a, b, c, d, e, f, g, h) do {		\
++	u32 t1, t2;						\
++	t1 = h + e1(e) + Ch(e, f, g) + SHA256_K[i] + W[i];	\
++	t2 = e0(a) + Maj(a, b, c);				\
++	d += t1;						\
++	h = t1 + t2;						\
++} while (0)
++
++static void sha256_transform(u32 *state, const u8 *input, u32 *W)
++{
++	u32 a, b, c, d, e, f, g, h;
++	int i;
++
++	/* load the input */
++	for (i = 0; i < 16; i += 8) {
++		LOAD_OP(i + 0, W, input);
++		LOAD_OP(i + 1, W, input);
++		LOAD_OP(i + 2, W, input);
++		LOAD_OP(i + 3, W, input);
++		LOAD_OP(i + 4, W, input);
++		LOAD_OP(i + 5, W, input);
++		LOAD_OP(i + 6, W, input);
++		LOAD_OP(i + 7, W, input);
++	}
++
++	/* now blend */
++	for (i = 16; i < 64; i += 8) {
++		BLEND_OP(i + 0, W);
++		BLEND_OP(i + 1, W);
++		BLEND_OP(i + 2, W);
++		BLEND_OP(i + 3, W);
++		BLEND_OP(i + 4, W);
++		BLEND_OP(i + 5, W);
++		BLEND_OP(i + 6, W);
++		BLEND_OP(i + 7, W);
++	}
++
++	/* load the state into our registers */
++	a = state[0];  b = state[1];  c = state[2];  d = state[3];
++	e = state[4];  f = state[5];  g = state[6];  h = state[7];
++
++	/* now iterate */
++	for (i = 0; i < 64; i += 8) {
++		SHA256_ROUND(i + 0, a, b, c, d, e, f, g, h);
++		SHA256_ROUND(i + 1, h, a, b, c, d, e, f, g);
++		SHA256_ROUND(i + 2, g, h, a, b, c, d, e, f);
++		SHA256_ROUND(i + 3, f, g, h, a, b, c, d, e);
++		SHA256_ROUND(i + 4, e, f, g, h, a, b, c, d);
++		SHA256_ROUND(i + 5, d, e, f, g, h, a, b, c);
++		SHA256_ROUND(i + 6, c, d, e, f, g, h, a, b);
++		SHA256_ROUND(i + 7, b, c, d, e, f, g, h, a);
++	}
++
++	state[0] += a; state[1] += b; state[2] += c; state[3] += d;
++	state[4] += e; state[5] += f; state[6] += g; state[7] += h;
++}
++
++static void memzero_explicit(void *addr, int size) {
++  memset(addr, 0, size);
++}
++
++static void sha256_transform_blocks(struct sha256_state *sctx,
++				    const u8 *input, int blocks)
++{
++	u32 W[64];
++
++	do {
++		sha256_transform(sctx->state, input, W);
++		input += SHA256_BLOCK_SIZE;
++	} while (--blocks);
++
++	memzero_explicit(W, sizeof(W));
++}
++
++static inline int lib_sha256_base_do_update(struct sha256_state *sctx,
++					    const u8 *data,
++					    unsigned int len,
++					    sha256_block_fn *block_fn)
++{
++	unsigned int partial = sctx->count % SHA256_BLOCK_SIZE;
++
++	sctx->count += len;
++
++	if (__glibc_unlikely((partial + len) >= SHA256_BLOCK_SIZE)) {
++		int blocks;
++
++		if (partial) {
++			int p = SHA256_BLOCK_SIZE - partial;
++
++			memcpy(sctx->buf + partial, data, p);
++			data += p;
++			len -= p;
++
++			block_fn(sctx, sctx->buf, 1);
++		}
++
++		blocks = len / SHA256_BLOCK_SIZE;
++		len %= SHA256_BLOCK_SIZE;
++
++		if (blocks) {
++			block_fn(sctx, data, blocks);
++			data += blocks * SHA256_BLOCK_SIZE;
++		}
++		partial = 0;
++	}
++	if (len)
++		memcpy(sctx->buf + partial, data, len);
++
++	return 0;
++}
++
++#define bswap_64(x) __bswap_64 (x)
++
++#define cpu_to_be64(x)		bswap_64(x)
++
++void sha256_update(struct sha256_state *sctx, const u8 *data, unsigned int len)
++{
++	lib_sha256_base_do_update(sctx, data, len, sha256_transform_blocks);
++}
++
++static inline int lib_sha256_base_do_finalize(struct sha256_state *sctx,
++					      sha256_block_fn *block_fn)
++{
++	const int bit_offset = SHA256_BLOCK_SIZE - sizeof(be64);
++	be64 *bits = (be64 *)(sctx->buf + bit_offset);
++	unsigned int partial = sctx->count % SHA256_BLOCK_SIZE;
++
++	sctx->buf[partial++] = 0x80;
++	if (partial > bit_offset) {
++		memset(sctx->buf + partial, 0x0, SHA256_BLOCK_SIZE - partial);
++		partial = 0;
++
++		block_fn(sctx, sctx->buf, 1);
++	}
++
++	memset(sctx->buf + partial, 0x0, bit_offset - partial);
++	*bits = cpu_to_be64(sctx->count << 3);
++	block_fn(sctx, sctx->buf, 1);
++
++	return 0;
++}
++
++static inline int lib_sha256_base_finish(struct sha256_state *sctx, u8 *out,
++					 unsigned int digest_size)
++{
++	be32 *digest = (be32 *)out;
++	int i;
++
++	for (i = 0; digest_size > 0; i++, digest_size -= sizeof(be32))
++		put_unaligned_be32(sctx->state[i], digest++);
++
++	memzero_explicit(sctx, sizeof(*sctx));
++	return 0;
++}
++
++static void __sha256_final(struct sha256_state *sctx, u8 *out, int digest_size)
++{
++	lib_sha256_base_do_finalize(sctx, sha256_transform_blocks);
++	lib_sha256_base_finish(sctx, out, digest_size);
++}
++
++void sha256_final(struct sha256_state *sctx, u8 *out)
++{
++	__sha256_final(sctx, out, 32);
++}
++
++#ifndef ARRAY_SIZE
++#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
++#endif
++
++/* RSA and Certificate start below */
++typedef int (*asn1_action_t)(void *context,
++			     size_t hdrlen, /* In case of ANY type */
++			     unsigned char tag, /* In case of ANY type */
++			     const void *value, size_t vlen);
++
++struct asn1_decoder {
++	const unsigned char *machine;
++	size_t machlen;
++	const asn1_action_t *actions;
++};
++
++enum asn1_opcode {
++	/* The tag-matching ops come first and the odd-numbered slots
++	 * are for OR_SKIP ops.
++	 */
++#define ASN1_OP_MATCH__SKIP		  0x01
++#define ASN1_OP_MATCH__ACT		  0x02
++#define ASN1_OP_MATCH__JUMP		  0x04
++#define ASN1_OP_MATCH__ANY		  0x08
++#define ASN1_OP_MATCH__COND		  0x10
++
++	ASN1_OP_MATCH			= 0x00,
++	ASN1_OP_MATCH_OR_SKIP		= 0x01,
++	ASN1_OP_MATCH_ACT		= 0x02,
++	ASN1_OP_MATCH_ACT_OR_SKIP	= 0x03,
++	ASN1_OP_MATCH_JUMP		= 0x04,
++	ASN1_OP_MATCH_JUMP_OR_SKIP	= 0x05,
++	ASN1_OP_MATCH_ANY		= 0x08,
++	ASN1_OP_MATCH_ANY_OR_SKIP	= 0x09,
++	ASN1_OP_MATCH_ANY_ACT		= 0x0a,
++	ASN1_OP_MATCH_ANY_ACT_OR_SKIP	= 0x0b,
++	/* Everything before here matches unconditionally */
++
++	ASN1_OP_COND_MATCH_OR_SKIP	= 0x11,
++	ASN1_OP_COND_MATCH_ACT_OR_SKIP	= 0x13,
++	ASN1_OP_COND_MATCH_JUMP_OR_SKIP	= 0x15,
++	ASN1_OP_COND_MATCH_ANY		= 0x18,
++	ASN1_OP_COND_MATCH_ANY_OR_SKIP	= 0x19,
++	ASN1_OP_COND_MATCH_ANY_ACT	= 0x1a,
++	ASN1_OP_COND_MATCH_ANY_ACT_OR_SKIP = 0x1b,
++
++	/* Everything before here will want a tag from the data */
++#define ASN1_OP__MATCHES_TAG ASN1_OP_COND_MATCH_ANY_ACT_OR_SKIP
++
++	/* These are here to help fill up space */
++	ASN1_OP_COND_FAIL		= 0x1c,
++	ASN1_OP_COMPLETE		= 0x1d,
++	ASN1_OP_ACT			= 0x1e,
++	ASN1_OP_MAYBE_ACT		= 0x1f,
++
++	/* The following eight have bit 0 -> SET, 1 -> OF, 2 -> ACT */
++	ASN1_OP_END_SEQ			= 0x20,
++	ASN1_OP_END_SET			= 0x21,
++	ASN1_OP_END_SEQ_OF		= 0x22,
++	ASN1_OP_END_SET_OF		= 0x23,
++	ASN1_OP_END_SEQ_ACT		= 0x24,
++	ASN1_OP_END_SET_ACT		= 0x25,
++	ASN1_OP_END_SEQ_OF_ACT		= 0x26,
++	ASN1_OP_END_SET_OF_ACT		= 0x27,
++#define ASN1_OP_END__SET		  0x01
++#define ASN1_OP_END__OF			  0x02
++#define ASN1_OP_END__ACT		  0x04
++
++	ASN1_OP_RETURN			= 0x28,
++
++	ASN1_OP__NR
++};
++
++#define _tag(CLASS, CP, TAG) ((ASN1_##CLASS << 6) | (ASN1_##CP << 5) | ASN1_##TAG)
++#define _tagn(CLASS, CP, TAG) ((ASN1_##CLASS << 6) | (ASN1_##CP << 5) | TAG)
++#define _jump_target(N) (N)
++#define _action(N) (N)
++
++#define MAX_ERRNO	4095
++
++#define IS_ERR_VALUE(x) __glibc_unlikely((x) >= (unsigned long)-MAX_ERRNO)
++
++static inline void * ERR_PTR(long error_)
++{
++	return (void *) error_;
++}
++
++static inline long PTR_ERR(const void *ptr)
++{
++	return (long) ptr;
++}
++
++static inline bool IS_ERR(const void *ptr)
++{
++	return IS_ERR_VALUE((unsigned long)ptr);
++}
++
++/*
++ * OIDs are turned into these values if possible, or OID__NR if not held here.
++ *
++ * NOTE!  Do not mess with the format of each line as this is read by
++ *	  build_OID_registry.pl to generate the data for look_up_OID().
++ */
++enum OID {
++	OID_id_dsa_with_sha1,		/* 1.2.840.10030.4.3 */
++	OID_id_dsa,			/* 1.2.840.10040.4.1 */
++	OID_id_ecPublicKey,		/* 1.2.840.10045.2.1 */
++	OID_id_prime192v1,		/* 1.2.840.10045.3.1.1 */
++	OID_id_prime256v1,		/* 1.2.840.10045.3.1.7 */
++	OID_id_ecdsa_with_sha1,		/* 1.2.840.10045.4.1 */
++	OID_id_ecdsa_with_sha224,	/* 1.2.840.10045.4.3.1 */
++	OID_id_ecdsa_with_sha256,	/* 1.2.840.10045.4.3.2 */
++	OID_id_ecdsa_with_sha384,	/* 1.2.840.10045.4.3.3 */
++	OID_id_ecdsa_with_sha512,	/* 1.2.840.10045.4.3.4 */
++
++	/* PKCS#1 {iso(1) member-body(2) us(840) rsadsi(113549) pkcs(1) pkcs-1(1)} */
++	OID_rsaEncryption,		/* 1.2.840.113549.1.1.1 */
++	OID_md2WithRSAEncryption,	/* 1.2.840.113549.1.1.2 */
++	OID_md3WithRSAEncryption,	/* 1.2.840.113549.1.1.3 */
++	OID_md4WithRSAEncryption,	/* 1.2.840.113549.1.1.4 */
++	OID_sha1WithRSAEncryption,	/* 1.2.840.113549.1.1.5 */
++	OID_sha256WithRSAEncryption,	/* 1.2.840.113549.1.1.11 */
++	OID_sha384WithRSAEncryption,	/* 1.2.840.113549.1.1.12 */
++	OID_sha512WithRSAEncryption,	/* 1.2.840.113549.1.1.13 */
++	OID_sha224WithRSAEncryption,	/* 1.2.840.113549.1.1.14 */
++	/* PKCS#7 {iso(1) member-body(2) us(840) rsadsi(113549) pkcs(1) pkcs-7(7)} */
++	OID_data,			/* 1.2.840.113549.1.7.1 */
++	OID_signed_data,		/* 1.2.840.113549.1.7.2 */
++	/* PKCS#9 {iso(1) member-body(2) us(840) rsadsi(113549) pkcs(1) pkcs-9(9)} */
++	OID_email_address,		/* 1.2.840.113549.1.9.1 */
++	OID_contentType,		/* 1.2.840.113549.1.9.3 */
++	OID_messageDigest,		/* 1.2.840.113549.1.9.4 */
++	OID_signingTime,		/* 1.2.840.113549.1.9.5 */
++	OID_smimeCapabilites,		/* 1.2.840.113549.1.9.15 */
++	OID_smimeAuthenticatedAttrs,	/* 1.2.840.113549.1.9.16.2.11 */
++
++	/* {iso(1) member-body(2) us(840) rsadsi(113549) digestAlgorithm(2)} */
++	OID_md2,			/* 1.2.840.113549.2.2 */
++	OID_md4,			/* 1.2.840.113549.2.4 */
++	OID_md5,			/* 1.2.840.113549.2.5 */
++
++	OID_mskrb5,			/* 1.2.840.48018.1.2.2 */
++	OID_krb5,			/* 1.2.840.113554.1.2.2 */
++	OID_krb5u2u,			/* 1.2.840.113554.1.2.2.3 */
++
++	/* Microsoft Authenticode & Software Publishing */
++	OID_msIndirectData,		/* 1.3.6.1.4.1.311.2.1.4 */
++	OID_msStatementType,		/* 1.3.6.1.4.1.311.2.1.11 */
++	OID_msSpOpusInfo,		/* 1.3.6.1.4.1.311.2.1.12 */
++	OID_msPeImageDataObjId,		/* 1.3.6.1.4.1.311.2.1.15 */
++	OID_msIndividualSPKeyPurpose,	/* 1.3.6.1.4.1.311.2.1.21 */
++	OID_msOutlookExpress,		/* 1.3.6.1.4.1.311.16.4 */
++
++	OID_ntlmssp,			/* 1.3.6.1.4.1.311.2.2.10 */
++
++	OID_spnego,			/* 1.3.6.1.5.5.2 */
++
++	OID_IAKerb,			/* 1.3.6.1.5.2.5 */
++	OID_PKU2U,			/* 1.3.5.1.5.2.7 */
++	OID_Scram,			/* 1.3.6.1.5.5.14 */
++	OID_certAuthInfoAccess,		/* 1.3.6.1.5.5.7.1.1 */
++	OID_sha1,			/* 1.3.14.3.2.26 */
++	OID_id_ansip384r1,		/* 1.3.132.0.34 */
++	OID_sha256,			/* 2.16.840.1.101.3.4.2.1 */
++	OID_sha384,			/* 2.16.840.1.101.3.4.2.2 */
++	OID_sha512,			/* 2.16.840.1.101.3.4.2.3 */
++	OID_sha224,			/* 2.16.840.1.101.3.4.2.4 */
++
++	/* Distinguished Name attribute IDs [RFC 2256] */
++	OID_commonName,			/* 2.5.4.3 */
++	OID_surname,			/* 2.5.4.4 */
++	OID_countryName,		/* 2.5.4.6 */
++	OID_locality,			/* 2.5.4.7 */
++	OID_stateOrProvinceName,	/* 2.5.4.8 */
++	OID_organizationName,		/* 2.5.4.10 */
++	OID_organizationUnitName,	/* 2.5.4.11 */
++	OID_title,			/* 2.5.4.12 */
++	OID_description,		/* 2.5.4.13 */
++	OID_name,			/* 2.5.4.41 */
++	OID_givenName,			/* 2.5.4.42 */
++	OID_initials,			/* 2.5.4.43 */
++	OID_generationalQualifier,	/* 2.5.4.44 */
++
++	/* Certificate extension IDs */
++	OID_subjectKeyIdentifier,	/* 2.5.29.14 */
++	OID_keyUsage,			/* 2.5.29.15 */
++	OID_subjectAltName,		/* 2.5.29.17 */
++	OID_issuerAltName,		/* 2.5.29.18 */
++	OID_basicConstraints,		/* 2.5.29.19 */
++	OID_crlDistributionPoints,	/* 2.5.29.31 */
++	OID_certPolicies,		/* 2.5.29.32 */
++	OID_authorityKeyIdentifier,	/* 2.5.29.35 */
++	OID_extKeyUsage,		/* 2.5.29.37 */
++
++	/* Heimdal mechanisms */
++	OID_NetlogonMechanism,		/* 1.2.752.43.14.2 */
++	OID_appleLocalKdcSupported,	/* 1.2.752.43.14.3 */
++
++	/* EC-RDSA */
++	OID_gostCPSignA,		/* 1.2.643.2.2.35.1 */
++	OID_gostCPSignB,		/* 1.2.643.2.2.35.2 */
++	OID_gostCPSignC,		/* 1.2.643.2.2.35.3 */
++	OID_gost2012PKey256,		/* 1.2.643.7.1.1.1.1 */
++	OID_gost2012PKey512,		/* 1.2.643.7.1.1.1.2 */
++	OID_gost2012Digest256,		/* 1.2.643.7.1.1.2.2 */
++	OID_gost2012Digest512,		/* 1.2.643.7.1.1.2.3 */
++	OID_gost2012Signature256,	/* 1.2.643.7.1.1.3.2 */
++	OID_gost2012Signature512,	/* 1.2.643.7.1.1.3.3 */
++	OID_gostTC26Sign256A,		/* 1.2.643.7.1.2.1.1.1 */
++	OID_gostTC26Sign256B,		/* 1.2.643.7.1.2.1.1.2 */
++	OID_gostTC26Sign256C,		/* 1.2.643.7.1.2.1.1.3 */
++	OID_gostTC26Sign256D,		/* 1.2.643.7.1.2.1.1.4 */
++	OID_gostTC26Sign512A,		/* 1.2.643.7.1.2.1.2.1 */
++	OID_gostTC26Sign512B,		/* 1.2.643.7.1.2.1.2.2 */
++	OID_gostTC26Sign512C,		/* 1.2.643.7.1.2.1.2.3 */
++
++	/* OSCCA */
++	OID_sm2,			/* 1.2.156.10197.1.301 */
++	OID_sm3,			/* 1.2.156.10197.1.401 */
++	OID_SM2_with_SM3,		/* 1.2.156.10197.1.501 */
++	OID_sm3WithRSAEncryption,	/* 1.2.156.10197.1.504 */
++
++	/* TCG defined OIDS for TPM based keys */
++	OID_TPMLoadableKey,		/* 2.23.133.10.1.3 */
++	OID_TPMImportableKey,		/* 2.23.133.10.1.4 */
++	OID_TPMSealedData,		/* 2.23.133.10.1.5 */
++
++	OID__NR
++};
++
++static const unsigned short oid_index[OID__NR + 1] = {
++	[OID_id_dsa_with_sha1] = 0,
++	[OID_id_dsa] = 7,
++	[OID_id_ecPublicKey] = 14,
++	[OID_id_prime192v1] = 21,
++	[OID_id_prime256v1] = 29,
++	[OID_id_ecdsa_with_sha1] = 37,
++	[OID_id_ecdsa_with_sha224] = 44,
++	[OID_id_ecdsa_with_sha256] = 52,
++	[OID_id_ecdsa_with_sha384] = 60,
++	[OID_id_ecdsa_with_sha512] = 68,
++	[OID_rsaEncryption] = 76,
++	[OID_md2WithRSAEncryption] = 85,
++	[OID_md3WithRSAEncryption] = 94,
++	[OID_md4WithRSAEncryption] = 103,
++	[OID_sha1WithRSAEncryption] = 112,
++	[OID_sha256WithRSAEncryption] = 121,
++	[OID_sha384WithRSAEncryption] = 130,
++	[OID_sha512WithRSAEncryption] = 139,
++	[OID_sha224WithRSAEncryption] = 148,
++	[OID_data] = 157,
++	[OID_signed_data] = 166,
++	[OID_email_address] = 175,
++	[OID_contentType] = 184,
++	[OID_messageDigest] = 193,
++	[OID_signingTime] = 202,
++	[OID_smimeCapabilites] = 211,
++	[OID_smimeAuthenticatedAttrs] = 220,
++	[OID_md2] = 231,
++	[OID_md4] = 239,
++	[OID_md5] = 247,
++	[OID_mskrb5] = 255,
++	[OID_krb5] = 264,
++	[OID_krb5u2u] = 273,
++	[OID_msIndirectData] = 283,
++	[OID_msStatementType] = 293,
++	[OID_msSpOpusInfo] = 303,
++	[OID_msPeImageDataObjId] = 313,
++	[OID_msIndividualSPKeyPurpose] = 323,
++	[OID_msOutlookExpress] = 333,
++	[OID_ntlmssp] = 342,
++	[OID_spnego] = 352,
++	[OID_IAKerb] = 358,
++	[OID_PKU2U] = 364,
++	[OID_Scram] = 370,
++	[OID_certAuthInfoAccess] = 376,
++	[OID_sha1] = 384,
++	[OID_id_ansip384r1] = 389,
++	[OID_sha256] = 394,
++	[OID_sha384] = 403,
++	[OID_sha512] = 412,
++	[OID_sha224] = 421,
++	[OID_commonName] = 430,
++	[OID_surname] = 433,
++	[OID_countryName] = 436,
++	[OID_locality] = 439,
++	[OID_stateOrProvinceName] = 442,
++	[OID_organizationName] = 445,
++	[OID_organizationUnitName] = 448,
++	[OID_title] = 451,
++	[OID_description] = 454,
++	[OID_name] = 457,
++	[OID_givenName] = 460,
++	[OID_initials] = 463,
++	[OID_generationalQualifier] = 466,
++	[OID_subjectKeyIdentifier] = 469,
++	[OID_keyUsage] = 472,
++	[OID_subjectAltName] = 475,
++	[OID_issuerAltName] = 478,
++	[OID_basicConstraints] = 481,
++	[OID_crlDistributionPoints] = 484,
++	[OID_certPolicies] = 487,
++	[OID_authorityKeyIdentifier] = 490,
++	[OID_extKeyUsage] = 493,
++	[OID_NetlogonMechanism] = 496,
++	[OID_appleLocalKdcSupported] = 502,
++	[OID_gostCPSignA] = 508,
++	[OID_gostCPSignB] = 515,
++	[OID_gostCPSignC] = 522,
++	[OID_gost2012PKey256] = 529,
++	[OID_gost2012PKey512] = 537,
++	[OID_gost2012Digest256] = 545,
++	[OID_gost2012Digest512] = 553,
++	[OID_gost2012Signature256] = 561,
++	[OID_gost2012Signature512] = 569,
++	[OID_gostTC26Sign256A] = 577,
++	[OID_gostTC26Sign256B] = 586,
++	[OID_gostTC26Sign256C] = 595,
++	[OID_gostTC26Sign256D] = 604,
++	[OID_gostTC26Sign512A] = 613,
++	[OID_gostTC26Sign512B] = 622,
++	[OID_gostTC26Sign512C] = 631,
++	[OID_sm2] = 640,
++	[OID_sm3] = 648,
++	[OID_SM2_with_SM3] = 656,
++	[OID_sm3WithRSAEncryption] = 664,
++	[OID_TPMLoadableKey] = 672,
++	[OID_TPMImportableKey] = 678,
++	[OID_TPMSealedData] = 684,
++	[OID__NR] = 690
++};
++
++static const unsigned char oid_data[690] = {
++	42, 134, 72, 206, 46, 4, 3, 	// id_dsa_with_sha1
++	42, 134, 72, 206, 56, 4, 1, 	// id_dsa
++	42, 134, 72, 206, 61, 2, 1, 	// id_ecPublicKey
++	42, 134, 72, 206, 61, 3, 1, 1, 	// id_prime192v1
++	42, 134, 72, 206, 61, 3, 1, 7, 	// id_prime256v1
++	42, 134, 72, 206, 61, 4, 1, 	// id_ecdsa_with_sha1
++	42, 134, 72, 206, 61, 4, 3, 1, 	// id_ecdsa_with_sha224
++	42, 134, 72, 206, 61, 4, 3, 2, 	// id_ecdsa_with_sha256
++	42, 134, 72, 206, 61, 4, 3, 3, 	// id_ecdsa_with_sha384
++	42, 134, 72, 206, 61, 4, 3, 4, 	// id_ecdsa_with_sha512
++	42, 134, 72, 134, 247, 13, 1, 1, 1, 	// rsaEncryption
++	42, 134, 72, 134, 247, 13, 1, 1, 2, 	// md2WithRSAEncryption
++	42, 134, 72, 134, 247, 13, 1, 1, 3, 	// md3WithRSAEncryption
++	42, 134, 72, 134, 247, 13, 1, 1, 4, 	// md4WithRSAEncryption
++	42, 134, 72, 134, 247, 13, 1, 1, 5, 	// sha1WithRSAEncryption
++	42, 134, 72, 134, 247, 13, 1, 1, 11, 	// sha256WithRSAEncryption
++	42, 134, 72, 134, 247, 13, 1, 1, 12, 	// sha384WithRSAEncryption
++	42, 134, 72, 134, 247, 13, 1, 1, 13, 	// sha512WithRSAEncryption
++	42, 134, 72, 134, 247, 13, 1, 1, 14, 	// sha224WithRSAEncryption
++	42, 134, 72, 134, 247, 13, 1, 7, 1, 	// data
++	42, 134, 72, 134, 247, 13, 1, 7, 2, 	// signed_data
++	42, 134, 72, 134, 247, 13, 1, 9, 1, 	// email_address
++	42, 134, 72, 134, 247, 13, 1, 9, 3, 	// contentType
++	42, 134, 72, 134, 247, 13, 1, 9, 4, 	// messageDigest
++	42, 134, 72, 134, 247, 13, 1, 9, 5, 	// signingTime
++	42, 134, 72, 134, 247, 13, 1, 9, 15, 	// smimeCapabilites
++	42, 134, 72, 134, 247, 13, 1, 9, 16, 2, 11, 	// smimeAuthenticatedAttrs
++	42, 134, 72, 134, 247, 13, 2, 2, 	// md2
++	42, 134, 72, 134, 247, 13, 2, 4, 	// md4
++	42, 134, 72, 134, 247, 13, 2, 5, 	// md5
++	42, 134, 72, 130, 247, 18, 1, 2, 2, 	// mskrb5
++	42, 134, 72, 134, 247, 18, 1, 2, 2, 	// krb5
++	42, 134, 72, 134, 247, 18, 1, 2, 2, 3, 	// krb5u2u
++	43, 6, 1, 4, 1, 130, 55, 2, 1, 4, 	// msIndirectData
++	43, 6, 1, 4, 1, 130, 55, 2, 1, 11, 	// msStatementType
++	43, 6, 1, 4, 1, 130, 55, 2, 1, 12, 	// msSpOpusInfo
++	43, 6, 1, 4, 1, 130, 55, 2, 1, 15, 	// msPeImageDataObjId
++	43, 6, 1, 4, 1, 130, 55, 2, 1, 21, 	// msIndividualSPKeyPurpose
++	43, 6, 1, 4, 1, 130, 55, 16, 4, 	// msOutlookExpress
++	43, 6, 1, 4, 1, 130, 55, 2, 2, 10, 	// ntlmssp
++	43, 6, 1, 5, 5, 2, 	// spnego
++	43, 6, 1, 5, 2, 5, 	// IAKerb
++	43, 5, 1, 5, 2, 7, 	// PKU2U
++	43, 6, 1, 5, 5, 14, 	// Scram
++	43, 6, 1, 5, 5, 7, 1, 1, 	// certAuthInfoAccess
++	43, 14, 3, 2, 26, 	// sha1
++	43, 129, 4, 0, 34, 	// id_ansip384r1
++	96, 134, 72, 1, 101, 3, 4, 2, 1, 	// sha256
++	96, 134, 72, 1, 101, 3, 4, 2, 2, 	// sha384
++	96, 134, 72, 1, 101, 3, 4, 2, 3, 	// sha512
++	96, 134, 72, 1, 101, 3, 4, 2, 4, 	// sha224
++	85, 4, 3, 	// commonName
++	85, 4, 4, 	// surname
++	85, 4, 6, 	// countryName
++	85, 4, 7, 	// locality
++	85, 4, 8, 	// stateOrProvinceName
++	85, 4, 10, 	// organizationName
++	85, 4, 11, 	// organizationUnitName
++	85, 4, 12, 	// title
++	85, 4, 13, 	// description
++	85, 4, 41, 	// name
++	85, 4, 42, 	// givenName
++	85, 4, 43, 	// initials
++	85, 4, 44, 	// generationalQualifier
++	85, 29, 14, 	// subjectKeyIdentifier
++	85, 29, 15, 	// keyUsage
++	85, 29, 17, 	// subjectAltName
++	85, 29, 18, 	// issuerAltName
++	85, 29, 19, 	// basicConstraints
++	85, 29, 31, 	// crlDistributionPoints
++	85, 29, 32, 	// certPolicies
++	85, 29, 35, 	// authorityKeyIdentifier
++	85, 29, 37, 	// extKeyUsage
++	42, 133, 112, 43, 14, 2, 	// NetlogonMechanism
++	42, 133, 112, 43, 14, 3, 	// appleLocalKdcSupported
++	42, 133, 3, 2, 2, 35, 1, 	// gostCPSignA
++	42, 133, 3, 2, 2, 35, 2, 	// gostCPSignB
++	42, 133, 3, 2, 2, 35, 3, 	// gostCPSignC
++	42, 133, 3, 7, 1, 1, 1, 1, 	// gost2012PKey256
++	42, 133, 3, 7, 1, 1, 1, 2, 	// gost2012PKey512
++	42, 133, 3, 7, 1, 1, 2, 2, 	// gost2012Digest256
++	42, 133, 3, 7, 1, 1, 2, 3, 	// gost2012Digest512
++	42, 133, 3, 7, 1, 1, 3, 2, 	// gost2012Signature256
++	42, 133, 3, 7, 1, 1, 3, 3, 	// gost2012Signature512
++	42, 133, 3, 7, 1, 2, 1, 1, 1, 	// gostTC26Sign256A
++	42, 133, 3, 7, 1, 2, 1, 1, 2, 	// gostTC26Sign256B
++	42, 133, 3, 7, 1, 2, 1, 1, 3, 	// gostTC26Sign256C
++	42, 133, 3, 7, 1, 2, 1, 1, 4, 	// gostTC26Sign256D
++	42, 133, 3, 7, 1, 2, 1, 2, 1, 	// gostTC26Sign512A
++	42, 133, 3, 7, 1, 2, 1, 2, 2, 	// gostTC26Sign512B
++	42, 133, 3, 7, 1, 2, 1, 2, 3, 	// gostTC26Sign512C
++	42, 129, 28, 207, 85, 1, 130, 45, 	// sm2
++	42, 129, 28, 207, 85, 1, 131, 17, 	// sm3
++	42, 129, 28, 207, 85, 1, 131, 117, 	// SM2_with_SM3
++	42, 129, 28, 207, 85, 1, 131, 120, 	// sm3WithRSAEncryption
++	103, 129, 5, 10, 1, 3, 	// TPMLoadableKey
++	103, 129, 5, 10, 1, 4, 	// TPMImportableKey
++	103, 129, 5, 10, 1, 5, 	// TPMSealedData
++};
++
++static const struct {
++	unsigned char hash;
++	enum OID oid : 8;
++} oid_search_table[OID__NR] = {
++	[  0] = {  10, OID_title                               }, // 55040c
++	[  1] = {  11, OID_spnego                              }, // 2b0601050502
++	[  2] = {  11, OID_IAKerb                              }, // 2b0601050205
++	[  3] = {  13, OID_id_ansip384r1                       }, // 2b81040022
++	[  4] = {  19, OID_gostTC26Sign512C                    }, // 2a8503070102010203
++	[  5] = {  19, OID_gostTC26Sign256D                    }, // 2a8503070102010104
++	[  6] = {  23, OID_issuerAltName                       }, // 551d12
++	[  7] = {  23, OID_initials                            }, // 55042b
++	[  8] = {  29, OID_md2WithRSAEncryption                }, // 2a864886f70d010102
++	[  9] = {  30, OID_md2                                 }, // 2a864886f70d0202
++	[ 10] = {  32, OID_id_dsa_with_sha1                    }, // 2a8648ce2e0403
++	[ 11] = {  35, OID_contentType                         }, // 2a864886f70d010903
++	[ 12] = {  35, OID_sha256WithRSAEncryption             }, // 2a864886f70d01010b
++	[ 13] = {  36, OID_authorityKeyIdentifier              }, // 551d23
++	[ 14] = {  37, OID_description                         }, // 55040d
++	[ 15] = {  43, OID_id_dsa                              }, // 2a8648ce380401
++	[ 16] = {  44, OID_PKU2U                               }, // 2b0501050207
++	[ 17] = {  44, OID_krb5u2u                             }, // 2a864886f71201020203
++	[ 18] = {  49, OID_id_ecdsa_with_sha224                }, // 2a8648ce3d040301
++	[ 19] = {  51, OID_msIndividualSPKeyPurpose            }, // 2b060104018237020115
++	[ 20] = {  52, OID_SM2_with_SM3                        }, // 2a811ccf55018375
++	[ 21] = {  54, OID_basicConstraints                    }, // 551d13
++	[ 22] = {  54, OID_generationalQualifier               }, // 55042c
++	[ 23] = {  60, OID_gostCPSignA                         }, // 2a850302022301
++	[ 24] = {  60, OID_md3WithRSAEncryption                }, // 2a864886f70d010103
++	[ 25] = {  64, OID_TPMLoadableKey                      }, // 6781050a0103
++	[ 26] = {  64, OID_krb5                                }, // 2a864886f712010202
++	[ 27] = {  64, OID_signed_data                         }, // 2a864886f70d010702
++	[ 28] = {  76, OID_id_prime192v1                       }, // 2a8648ce3d030101
++	[ 29] = {  77, OID_countryName                         }, // 550406
++	[ 30] = {  77, OID_id_ecdsa_with_sha1                  }, // 2a8648ce3d0401
++	[ 31] = {  83, OID_sha256                              }, // 608648016503040201
++	[ 32] = {  84, OID_sm2                                 }, // 2a811ccf5501822d
++	[ 33] = {  85, OID_smimeCapabilites                    }, // 2a864886f70d01090f
++	[ 34] = {  87, OID_sha1                                }, // 2b0e03021a
++	[ 35] = {  93, OID_gostCPSignB                         }, // 2a850302022302
++	[ 36] = {  97, OID_email_address                       }, // 2a864886f70d010901
++	[ 37] = { 106, OID_extKeyUsage                         }, // 551d25
++	[ 38] = { 106, OID_msPeImageDataObjId                  }, // 2b06010401823702010f
++	[ 39] = { 110, OID_locality                            }, // 550407
++	[ 40] = { 124, OID_gost2012PKey256                     }, // 2a85030701010101
++	[ 41] = { 126, OID_gostCPSignC                         }, // 2a850302022303
++	[ 42] = { 126, OID_rsaEncryption                       }, // 2a864886f70d010101
++	[ 43] = { 130, OID_TPMSealedData                       }, // 6781050a0105
++	[ 44] = { 132, OID_smimeAuthenticatedAttrs             }, // 2a864886f70d010910020b
++	[ 45] = { 134, OID_Scram                               }, // 2b060105050e
++	[ 46] = { 142, OID_id_ecPublicKey                      }, // 2a8648ce3d0201
++	[ 47] = { 142, OID_sha224WithRSAEncryption             }, // 2a864886f70d01010e
++	[ 48] = { 143, OID_stateOrProvinceName                 }, // 550408
++	[ 49] = { 145, OID_sm3WithRSAEncryption                }, // 2a811ccf55018378
++	[ 50] = { 146, OID_subjectKeyIdentifier                }, // 551d0e
++	[ 51] = { 150, OID_id_ecdsa_with_sha512                }, // 2a8648ce3d040304
++	[ 52] = { 150, OID_id_prime256v1                       }, // 2a8648ce3d030107
++	[ 53] = { 157, OID_gost2012PKey512                     }, // 2a85030701010102
++	[ 54] = { 157, OID_sha512                              }, // 608648016503040203
++	[ 55] = { 160, OID_data                                }, // 2a864886f70d010701
++	[ 56] = { 161, OID_crlDistributionPoints               }, // 551d1f
++	[ 57] = { 161, OID_TPMImportableKey                    }, // 6781050a0104
++	[ 58] = { 173, OID_msOutlookExpress                    }, // 2b0601040182371004
++	[ 59] = { 178, OID_sha384                              }, // 608648016503040202
++	[ 60] = { 179, OID_keyUsage                            }, // 551d0f
++	[ 61] = { 179, OID_NetlogonMechanism                   }, // 2a85702b0e02
++	[ 62] = { 190, OID_gost2012Digest256                   }, // 2a85030701010202
++	[ 63] = { 191, OID_gostTC26Sign256A                    }, // 2a8503070102010101
++	[ 64] = { 195, OID_mskrb5                              }, // 2a864882f712010202
++	[ 65] = { 195, OID_md4WithRSAEncryption                }, // 2a864886f70d010104
++	[ 66] = { 198, OID_certPolicies                        }, // 551d20
++	[ 67] = { 200, OID_msSpOpusInfo                        }, // 2b06010401823702010c
++	[ 68] = { 201, OID_organizationName                    }, // 55040a
++	[ 69] = { 204, OID_messageDigest                       }, // 2a864886f70d010904
++	[ 70] = { 204, OID_sha384WithRSAEncryption             }, // 2a864886f70d01010c
++	[ 71] = { 208, OID_id_ecdsa_with_sha256                }, // 2a8648ce3d040302
++	[ 72] = { 208, OID_gostTC26Sign512A                    }, // 2a8503070102010201
++	[ 73] = { 208, OID_gostTC26Sign256B                    }, // 2a8503070102010102
++	[ 74] = { 212, OID_name                                }, // 550429
++	[ 75] = { 213, OID_commonName                          }, // 550403
++	[ 76] = { 213, OID_sm3                                 }, // 2a811ccf55018311
++	[ 77] = { 220, OID_md4                                 }, // 2a864886f70d0204
++	[ 78] = { 223, OID_gost2012Signature256                }, // 2a85030701010302
++	[ 79] = { 223, OID_gost2012Digest512                   }, // 2a85030701010203
++	[ 80] = { 226, OID_sha1WithRSAEncryption               }, // 2a864886f70d010105
++	[ 81] = { 227, OID_md5                                 }, // 2a864886f70d0205
++	[ 82] = { 228, OID_certAuthInfoAccess                  }, // 2b06010505070101
++	[ 83] = { 231, OID_ntlmssp                             }, // 2b06010401823702020a
++	[ 84] = { 231, OID_msStatementType                     }, // 2b06010401823702010b
++	[ 85] = { 234, OID_organizationUnitName                }, // 55040b
++	[ 86] = { 236, OID_appleLocalKdcSupported              }, // 2a85702b0e03
++	[ 87] = { 237, OID_signingTime                         }, // 2a864886f70d010905
++	[ 88] = { 237, OID_sha512WithRSAEncryption             }, // 2a864886f70d01010d
++	[ 89] = { 240, OID_gost2012Signature512                }, // 2a85030701010303
++	[ 90] = { 241, OID_gostTC26Sign512B                    }, // 2a8503070102010202
++	[ 91] = { 241, OID_gostTC26Sign256C                    }, // 2a8503070102010103
++	[ 92] = { 244, OID_surname                             }, // 550404
++	[ 93] = { 245, OID_subjectAltName                      }, // 551d11
++	[ 94] = { 245, OID_givenName                           }, // 55042a
++	[ 95] = { 247, OID_id_ecdsa_with_sha384                }, // 2a8648ce3d040303
++	[ 96] = { 252, OID_sha224                              }, // 608648016503040204
++	[ 97] = { 255, OID_msIndirectData                      }, // 2b060104018237020104
++};
++
++/* Class */
++enum asn1_class {
++	ASN1_UNIV	= 0,	/* Universal */
++	ASN1_APPL	= 1,	/* Application */
++	ASN1_CONT	= 2,	/* Context */
++	ASN1_PRIV	= 3	/* Private */
++};
++#define ASN1_CLASS_BITS	0xc0
++
++
++enum asn1_method {
++	ASN1_PRIM	= 0,	/* Primitive */
++	ASN1_CONS	= 1	/* Constructed */
++};
++#define ASN1_CONS_BIT	0x20
++
++/* Tag */
++enum asn1_tag {
++	ASN1_EOC	= 0,	/* End Of Contents or N/A */
++	ASN1_BOOL	= 1,	/* Boolean */
++	ASN1_INT	= 2,	/* Integer */
++	ASN1_BTS	= 3,	/* Bit String */
++	ASN1_OTS	= 4,	/* Octet String */
++	ASN1_NULL	= 5,	/* Null */
++	ASN1_OID	= 6,	/* Object Identifier  */
++	ASN1_ODE	= 7,	/* Object Description */
++	ASN1_EXT	= 8,	/* External */
++	ASN1_REAL	= 9,	/* Real float */
++	ASN1_ENUM	= 10,	/* Enumerated */
++	ASN1_EPDV	= 11,	/* Embedded PDV */
++	ASN1_UTF8STR	= 12,	/* UTF8 String */
++	ASN1_RELOID	= 13,	/* Relative OID */
++	/* 14 - Reserved */
++	/* 15 - Reserved */
++	ASN1_SEQ	= 16,	/* Sequence and Sequence of */
++	ASN1_SET	= 17,	/* Set and Set of */
++	ASN1_NUMSTR	= 18,	/* Numerical String */
++	ASN1_PRNSTR	= 19,	/* Printable String */
++	ASN1_TEXSTR	= 20,	/* T61 String / Teletext String */
++	ASN1_VIDSTR	= 21,	/* Videotex String */
++	ASN1_IA5STR	= 22,	/* IA5 String */
++	ASN1_UNITIM	= 23,	/* Universal Time */
++	ASN1_GENTIM	= 24,	/* General Time */
++	ASN1_GRASTR	= 25,	/* Graphic String */
++	ASN1_VISSTR	= 26,	/* Visible String */
++	ASN1_GENSTR	= 27,	/* General String */
++	ASN1_UNISTR	= 28,	/* Universal String */
++	ASN1_CHRSTR	= 29,	/* Character String */
++	ASN1_BMPSTR	= 30,	/* BMP String */
++	ASN1_LONG_TAG	= 31	/* Long form tag */
++};
++
++#define ASN1_INDEFINITE_LENGTH 0x80
++
++/**
++ * look_up_OID - Find an OID registration for the specified data
++ * @data: Binary representation of the OID
++ * @datasize: Size of the binary representation
++ */
++enum OID look_up_OID(const void *data, size_t datasize)
++{
++	const unsigned char *octets = data;
++	enum OID oid;
++	unsigned char xhash;
++	unsigned i, j, k, hash;
++	size_t len;
++
++	/* Hash the OID data */
++	hash = datasize - 1;
++
++	for (i = 0; i < datasize; i++)
++		hash += octets[i] * 33;
++	hash = (hash >> 24) ^ (hash >> 16) ^ (hash >> 8) ^ hash;
++	hash &= 0xff;
++
++	/* Binary search the OID registry.  OIDs are stored in ascending order
++	 * of hash value then ascending order of size and then in ascending
++	 * order of reverse value.
++	 */
++	i = 0;
++	k = OID__NR;
++	while (i < k) {
++		j = (i + k) / 2;
++
++		xhash = oid_search_table[j].hash;
++		if (xhash > hash) {
++			k = j;
++			continue;
++		}
++		if (xhash < hash) {
++			i = j + 1;
++			continue;
++		}
++
++		oid = oid_search_table[j].oid;
++		len = oid_index[oid + 1] - oid_index[oid];
++		if (len > datasize) {
++			k = j;
++			continue;
++		}
++		if (len < datasize) {
++			i = j + 1;
++			continue;
++		}
++
++		/* Variation is most likely to be at the tail end of the
++		 * OID, so do the comparison in reverse.
++		 */
++		while (len > 0) {
++			unsigned char a = oid_data[oid_index[oid] + --len];
++			unsigned char b = octets[len];
++			if (a > b) {
++				k = j;
++				goto next;
++			}
++			if (a < b) {
++				i = j + 1;
++				goto next;
++			}
++		}
++		return oid;
++	next:
++		;
++	}
++
++	return OID__NR;
++}
++
++/**
++ * parse_OID - Parse an OID from a bytestream
++ * @data: Binary representation of the header + OID
++ * @datasize: Size of the binary representation
++ * @oid: Pointer to oid to return result
++ *
++ * Parse an OID from a bytestream that holds the OID in the format
++ * ASN1_OID | length | oid. The length indicator must equal to datasize - 2.
++ * -EBADMSG is returned if the bytestream is too short.
++ */
++int parse_OID(const void *data, size_t datasize, enum OID *oid)
++{
++	const unsigned char *v = data;
++
++	/* we need 2 bytes of header and at least 1 byte for oid */
++	if (datasize < 3 || v[0] != ASN1_OID || v[1] != datasize - 2)
++		return -EBADMSG;
++
++	*oid = look_up_OID(data + 2, datasize - 2);
++	return 0;
++}
++
++#if 0
++/*
++ * sprint_OID - Print an Object Identifier into a buffer
++ * @data: The encoded OID to print
++ * @datasize: The size of the encoded OID
++ * @buffer: The buffer to render into
++ * @bufsize: The size of the buffer
++ *
++ * The OID is rendered into the buffer in "a.b.c.d" format and the number of
++ * bytes is returned.  -EBADMSG is returned if the data could not be interpreted
++ * and -ENOBUFS if the buffer was too small.
++ */
++int sprint_oid(const void *data, size_t datasize, char *buffer, size_t bufsize)
++{
++	const unsigned char *v = data, *end = v + datasize;
++	unsigned long num;
++	unsigned char n;
++	size_t ret;
++	int count;
++
++	if (v >= end)
++		goto bad;
++
++	n = *v++;
++	ret = count = snprintf(buffer, bufsize, "%u.%u", n / 40, n % 40);
++	if (count >= bufsize)
++		return -ENOBUFS;
++	buffer += count;
++	bufsize -= count;
++
++	while (v < end) {
++		n = *v++;
++		if (!(n & 0x80)) {
++			num = n;
++		} else {
++			num = n & 0x7f;
++			do {
++				if (v >= end)
++					goto bad;
++				n = *v++;
++				num <<= 7;
++				num |= n & 0x7f;
++			} while (n & 0x80);
++		}
++		ret += count = snprintf(buffer, bufsize, ".%lu", num);
++		if (count >= bufsize)
++			return -ENOBUFS;
++		buffer += count;
++		bufsize -= count;
++	}
++
++	return ret;
++
++bad:
++	snprintf(buffer, bufsize, "(bad)");
++	return -EBADMSG;
++}
++
++/**
++ * sprint_OID - Print an Object Identifier into a buffer
++ * @oid: The OID to print
++ * @buffer: The buffer to render into
++ * @bufsize: The size of the buffer
++ *
++ * The OID is rendered into the buffer in "a.b.c.d" format and the number of
++ * bytes is returned.
++ */
++int sprint_OID(enum OID oid, char *buffer, size_t bufsize)
++{
++	int ret;
++
++	BUG_ON(oid >= OID__NR);
++
++	ret = sprint_oid(oid_data + oid_index[oid],
++			 oid_index[oid + 1] - oid_index[oid],
++			 buffer, bufsize);
++	BUG_ON(ret == -EBADMSG);
++	return ret;
++}
++#endif
++
++struct asymmetric_key_id {
++	unsigned short	len;
++	unsigned char	data[];
++};
++
++/*
++ * Cryptographic data for the public-key subtype of the asymmetric key type.
++ *
++ * Note that this may include private part of the key as well as the public
++ * part.
++ */
++struct public_key {
++	void *key;
++	u32 keylen;
++	enum OID algo;
++	void *params;
++	u32 paramlen;
++	bool key_is_private;
++	const char *id_type;
++	const char *pkey_algo;
++	unsigned long key_eflags;	/* key extension flags */
++#define KEY_EFLAG_CA		0	/* set if the CA basic constraints is set */
++#define KEY_EFLAG_DIGITALSIG	1	/* set if the digitalSignature usage is set */
++#define KEY_EFLAG_KEYCERTSIGN	2	/* set if the keyCertSign usage is set */
++};
++
++/*
++ * Public key cryptography signature data
++ */
++struct public_key_signature {
++	struct asymmetric_key_id *auth_ids[3];
++	u8 *s;			/* Signature */
++	u8 *digest;
++	u32 s_size;		/* Number of bytes in signature */
++	u32 digest_size;	/* Number of bytes in digest */
++	const char *pkey_algo;
++	const char *hash_algo;
++	const char *encoding;
++};
++
++struct x509_certificate {
++	struct x509_certificate *next;
++	struct x509_certificate *signer;	/* Certificate that signed this one */
++	struct public_key *pub;			/* Public key details */
++	struct public_key_signature *sig;	/* Signature parameters */
++	char		*issuer;		/* Name of certificate issuer */
++	char		*subject;		/* Name of certificate subject */
++	struct asymmetric_key_id *id;		/* Issuer + Serial number */
++	struct asymmetric_key_id *skid;		/* Subject + subjectKeyId (optional) */
++	time64_t	valid_from;
++	time64_t	valid_to;
++	const void	*tbs;			/* Signed data */
++	unsigned	tbs_size;		/* Size of signed data */
++	unsigned	raw_sig_size;		/* Size of signature */
++	const void	*raw_sig;		/* Signature data */
++	const void	*raw_serial;		/* Raw serial number in ASN.1 */
++	unsigned	raw_serial_size;
++	unsigned	raw_issuer_size;
++	const void	*raw_issuer;		/* Raw issuer name in ASN.1 */
++	const void	*raw_subject;		/* Raw subject name in ASN.1 */
++	unsigned	raw_subject_size;
++	unsigned	raw_skid_size;
++	const void	*raw_skid;		/* Raw subjectKeyId in ASN.1 */
++	unsigned	index;
++	bool		seen;			/* Infinite recursion prevention */
++	bool		verified;
++	bool		self_signed;		/* T if self-signed (check unsupported_sig too) */
++	bool		unsupported_sig;	/* T if signature uses unsupported crypto */
++	bool		blacklisted;
++};
++
++struct x509_parse_context {
++	struct x509_certificate	*cert;		/* Certificate being constructed */
++	unsigned long	data;			/* Start of data */
++	const void	*key;			/* Key data */
++	size_t		key_size;		/* Size of key data */
++	const void	*params;		/* Key parameters */
++	size_t		params_size;		/* Size of key parameters */
++	enum OID	key_algo;		/* Algorithm used by the cert's key */
++	enum OID	last_oid;		/* Last OID encountered */
++	enum OID	sig_algo;		/* Algorithm used to sign the cert */
++	u8		o_size;			/* Size of organizationName (O) */
++	u8		cn_size;		/* Size of commonName (CN) */
++	u8		email_size;		/* Size of emailAddress */
++	u16		o_offset;		/* Offset of organizationName (O) */
++	u16		cn_offset;		/* Offset of commonName (CN) */
++	u16		email_offset;		/* Offset of emailAddress */
++	unsigned	raw_akid_size;
++	const void	*raw_akid;		/* Raw authorityKeyId in ASN.1 */
++	const void	*akid_raw_issuer;	/* Raw directoryName in authorityKeyId */
++	unsigned	akid_raw_issuer_size;
++};
++
++/*
++ * Extract the data for the public key algorithm
++ */
++int x509_extract_key_data(void *context, size_t hdrlen,
++			  unsigned char tag,
++			  const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++	enum OID oid;
++
++	ctx->key_algo = ctx->last_oid;
++	switch (ctx->last_oid) {
++	case OID_rsaEncryption:
++		ctx->cert->pub->pkey_algo = "rsa";
++		break;
++	case OID_gost2012PKey256:
++	case OID_gost2012PKey512:
++		ctx->cert->pub->pkey_algo = "ecrdsa";
++		break;
++	case OID_sm2:
++		ctx->cert->pub->pkey_algo = "sm2";
++		break;
++	case OID_id_ecPublicKey:
++		if (parse_OID(ctx->params, ctx->params_size, &oid) != 0)
++			return -EBADMSG;
++
++		switch (oid) {
++		case OID_sm2:
++			ctx->cert->pub->pkey_algo = "sm2";
++			break;
++		case OID_id_prime192v1:
++			ctx->cert->pub->pkey_algo = "ecdsa-nist-p192";
++			break;
++		case OID_id_prime256v1:
++			ctx->cert->pub->pkey_algo = "ecdsa-nist-p256";
++			break;
++		case OID_id_ansip384r1:
++			ctx->cert->pub->pkey_algo = "ecdsa-nist-p384";
++			break;
++		default:
++			return -ENOPKG;
++		}
++		break;
++	default:
++		return -ENOPKG;
++	}
++
++	/* Discard the BIT STRING metadata */
++	if (vlen < 1 || *(const u8 *)value != 0)
++		return -EBADMSG;
++	ctx->key = value + 1;
++	ctx->key_size = vlen - 1;
++	return 0;
++}
++
++/*
++ * Note some of the name segments from which we'll fabricate a name.
++ */
++int x509_extract_name_segment(void *context, size_t hdrlen,
++			      unsigned char tag,
++			      const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++
++	switch (ctx->last_oid) {
++	case OID_commonName:
++		ctx->cn_size = vlen;
++		ctx->cn_offset = (unsigned long)value - ctx->data;
++		break;
++	case OID_organizationName:
++		ctx->o_size = vlen;
++		ctx->o_offset = (unsigned long)value - ctx->data;
++		break;
++	case OID_email_address:
++		ctx->email_size = vlen;
++		ctx->email_offset = (unsigned long)value - ctx->data;
++		break;
++	default:
++		break;
++	}
++
++	return 0;
++}
++
++/*
++ * Note an OID when we find one for later processing when we know how
++ * to interpret it.
++ */
++int x509_note_OID(void *context, size_t hdrlen,
++	     unsigned char tag,
++	     const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++
++	ctx->last_oid = look_up_OID(value, vlen);
++	if (ctx->last_oid == OID__NR) {
++#if 0    
++		char buffer[50];
++		sprint_oid(value, vlen, buffer, sizeof(buffer));
++#endif
++		_dl_debug_printf("Unknown OID: [%lu]\n",
++			 (unsigned long)value - ctx->data);
++	}
++	return 0;
++}
++
++/*
++ * Fabricate and save the issuer and subject names
++ */
++static int x509_fabricate_name(struct x509_parse_context *ctx, size_t hdrlen,
++			       unsigned char tag,
++			       char **_name, size_t vlen)
++{
++	const void *name, *data = (const void *)ctx->data;
++	size_t namesize;
++	char *buffer;
++
++	if (*_name)
++		return -EINVAL;
++
++	/* Empty name string if no material */
++	if (!ctx->cn_size && !ctx->o_size && !ctx->email_size) {
++		buffer = malloc(1);
++		if (!buffer)
++			return -ENOMEM;
++		buffer[0] = 0;
++		goto done;
++	}
++
++	if (ctx->cn_size && ctx->o_size) {
++		/* Consider combining O and CN, but use only the CN if it is
++		 * prefixed by the O, or a significant portion thereof.
++		 */
++		namesize = ctx->cn_size;
++		name = data + ctx->cn_offset;
++		if (ctx->cn_size >= ctx->o_size &&
++		    memcmp(data + ctx->cn_offset, data + ctx->o_offset,
++			   ctx->o_size) == 0)
++			goto single_component;
++		if (ctx->cn_size >= 7 &&
++		    ctx->o_size >= 7 &&
++		    memcmp(data + ctx->cn_offset, data + ctx->o_offset, 7) == 0)
++			goto single_component;
++
++		buffer = malloc(ctx->o_size + 2 + ctx->cn_size + 1);
++		if (!buffer)
++			return -ENOMEM;
++
++		memcpy(buffer,
++		       data + ctx->o_offset, ctx->o_size);
++		buffer[ctx->o_size + 0] = ':';
++		buffer[ctx->o_size + 1] = ' ';
++		memcpy(buffer + ctx->o_size + 2,
++		       data + ctx->cn_offset, ctx->cn_size);
++		buffer[ctx->o_size + 2 + ctx->cn_size] = 0;
++		goto done;
++
++	} else if (ctx->cn_size) {
++		namesize = ctx->cn_size;
++		name = data + ctx->cn_offset;
++	} else if (ctx->o_size) {
++		namesize = ctx->o_size;
++		name = data + ctx->o_offset;
++	} else {
++		namesize = ctx->email_size;
++		name = data + ctx->email_offset;
++	}
++
++single_component:
++	buffer = malloc(namesize + 1);
++	if (!buffer)
++		return -ENOMEM;
++	memcpy(buffer, name, namesize);
++	buffer[namesize] = 0;
++
++done:
++	*_name = buffer;
++	ctx->cn_size = 0;
++	ctx->o_size = 0;
++	ctx->email_size = 0;
++	return 0;
++}
++
++/**
++ * asymmetric_key_generate_id: Construct an asymmetric key ID
++ * @val_1: First binary blob
++ * @len_1: Length of first binary blob
++ * @val_2: Second binary blob
++ * @len_2: Length of second binary blob
++ *
++ * Construct an asymmetric key ID from a pair of binary blobs.
++ */
++struct asymmetric_key_id *asymmetric_key_generate_id(const void *val_1,
++						     size_t len_1,
++						     const void *val_2,
++						     size_t len_2)
++{
++	struct asymmetric_key_id *kid;
++
++	kid = malloc(sizeof(struct asymmetric_key_id) + len_1 + len_2);
++	if (!kid)
++		return ERR_PTR(-ENOMEM);
++	kid->len = len_1 + len_2;
++	memcpy(kid->data, val_1, len_1);
++	memcpy(kid->data + len_1, val_2, len_2);
++	return kid;
++}
++
++int x509_note_issuer(void *context, size_t hdrlen,
++		     unsigned char tag,
++		     const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++	struct asymmetric_key_id *kid;
++
++	ctx->cert->raw_issuer = value;
++	ctx->cert->raw_issuer_size = vlen;
++
++	if (!ctx->cert->sig->auth_ids[2]) {
++		kid = asymmetric_key_generate_id(value, vlen, "", 0);
++		if (IS_ERR(kid))
++			return PTR_ERR(kid);
++		ctx->cert->sig->auth_ids[2] = kid;
++	}
++
++	return x509_fabricate_name(ctx, hdrlen, tag, &ctx->cert->issuer, vlen);
++}
++
++time64_t mktime64(const unsigned int year0, const unsigned int mon0,
++		const unsigned int day, const unsigned int hour,
++		const unsigned int min, const unsigned int sec)
++{
++	unsigned int mon = mon0, year = year0;
++
++	/* 1..12 -> 11,12,1..10 */
++	if (0 >= (int) (mon -= 2)) {
++		mon += 12;	/* Puts Feb last since it has leap day */
++		year -= 1;
++	}
++
++	return ((((time64_t)
++		  (year/4 - year/100 + year/400 + 367*mon/12 + day) +
++		  year*365 - 719499
++	    )*24 + hour /* now have hours - midnight tomorrow handled here */
++	  )*60 + min /* now have minutes */
++	)*60 + sec; /* finally seconds */
++}
++
++/**
++ * x509_decode_time - Decode an X.509 time ASN.1 object
++ * @_t: The time to fill in
++ * @hdrlen: The length of the object header
++ * @tag: The object tag
++ * @value: The object value
++ * @vlen: The size of the object value
++ *
++ * Decode an ASN.1 universal time or generalised time field into a struct the
++ * kernel can handle and check it for validity.  The time is decoded thus:
++ *
++ *	[RFC5280 §4.1.2.5]
++ *	CAs conforming to this profile MUST always encode certificate validity
++ *	dates through the year 2049 as UTCTime; certificate validity dates in
++ *	2050 or later MUST be encoded as GeneralizedTime.  Conforming
++ *	applications MUST be able to process validity dates that are encoded in
++ *	either UTCTime or GeneralizedTime.
++ */
++int x509_decode_time(time64_t *_t,  size_t hdrlen,
++		     unsigned char tag,
++		     const unsigned char *value, size_t vlen)
++{
++	static const unsigned char month_lengths[] = { 31, 28, 31, 30, 31, 30,
++						       31, 31, 30, 31, 30, 31 };
++	const unsigned char *p = value;
++	unsigned year, mon, day, hour, min, sec, mon_len;
++
++#define dec2bin(X) ({ unsigned char x = (X) - '0'; if (x > 9) goto invalid_time; x; })
++#define DD2bin(P) ({ unsigned x = dec2bin(P[0]) * 10 + dec2bin(P[1]); P += 2; x; })
++
++	if (tag == ASN1_UNITIM) {
++		/* UTCTime: YYMMDDHHMMSSZ */
++		if (vlen != 13)
++			goto unsupported_time;
++		year = DD2bin(p);
++		if (year >= 50)
++			year += 1900;
++		else
++			year += 2000;
++	} else if (tag == ASN1_GENTIM) {
++		/* GenTime: YYYYMMDDHHMMSSZ */
++		if (vlen != 15)
++			goto unsupported_time;
++		year = DD2bin(p) * 100 + DD2bin(p);
++		if (year >= 1950 && year <= 2049)
++			goto invalid_time;
++	} else {
++		goto unsupported_time;
++	}
++
++	mon  = DD2bin(p);
++	day = DD2bin(p);
++	hour = DD2bin(p);
++	min  = DD2bin(p);
++	sec  = DD2bin(p);
++
++	if (*p != 'Z')
++		goto unsupported_time;
++
++	if (year < 1970 ||
++	    mon < 1 || mon > 12)
++		goto invalid_time;
++
++	mon_len = month_lengths[mon - 1];
++	if (mon == 2) {
++		if (year % 4 == 0) {
++			mon_len = 29;
++			if (year % 100 == 0) {
++				mon_len = 28;
++				if (year % 400 == 0)
++					mon_len = 29;
++			}
++		}
++	}
++
++	if (day < 1 || day > mon_len ||
++	    hour > 24 || /* ISO 8601 permits 24:00:00 as midnight tomorrow */
++	    min > 59 ||
++	    sec > 60) /* ISO 8601 permits leap seconds [X.680 46.3] */
++		goto invalid_time;
++
++	*_t = mktime64(year, mon, day, hour, min, sec);
++	return 0;
++
++unsupported_time:
++	_dl_error_printf("Got unsupported time\n");
++	return -EBADMSG;
++invalid_time:
++	_dl_error_printf("Got invalid time\n");
++	return -EBADMSG;
++}
++
++int x509_note_not_after(void *context, size_t hdrlen,
++			unsigned char tag,
++			const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++
++	return x509_decode_time(&ctx->cert->valid_to, hdrlen, tag, value, vlen);
++}
++
++int x509_note_not_before(void *context, size_t hdrlen,
++			 unsigned char tag,
++			 const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++
++	return x509_decode_time(&ctx->cert->valid_from, hdrlen, tag, value, vlen);
++}
++
++/*
++ * Extract the parameters for the public key
++ */
++int x509_note_params(void *context, size_t hdrlen,
++		     unsigned char tag,
++		     const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++
++	/*
++	 * AlgorithmIdentifier is used three times in the x509, we should skip
++	 * first and ignore third, using second one which is after subject and
++	 * before subjectPublicKey.
++	 */
++	if (!ctx->cert->raw_subject || ctx->key)
++		return 0;
++	ctx->params = value - hdrlen;
++	ctx->params_size = vlen + hdrlen;
++	return 0;
++}
++
++/*
++ * Note the certificate serial number
++ */
++int x509_note_serial(void *context, size_t hdrlen,
++		     unsigned char tag,
++		     const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++
++	ctx->cert->raw_serial = value;
++	ctx->cert->raw_serial_size = vlen;
++	return 0;
++}
++
++/*
++ * Record the algorithm that was used to sign this certificate.
++ */
++int x509_note_sig_algo(void *context, size_t hdrlen, unsigned char tag,
++		       const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++
++	_dl_debug_printf("PubKey Algo: %u\n", ctx->last_oid);
++
++	switch (ctx->last_oid) {
++	case OID_md2WithRSAEncryption:
++	case OID_md3WithRSAEncryption:
++	default:
++		return -ENOPKG; /* Unsupported combination */
++
++	case OID_md4WithRSAEncryption:
++		ctx->cert->sig->hash_algo = "md4";
++		goto rsa_pkcs1;
++
++	case OID_sha1WithRSAEncryption:
++		ctx->cert->sig->hash_algo = "sha1";
++		goto rsa_pkcs1;
++
++	case OID_sha256WithRSAEncryption:
++		ctx->cert->sig->hash_algo = "sha256";
++		goto rsa_pkcs1;
++
++	case OID_sha384WithRSAEncryption:
++		ctx->cert->sig->hash_algo = "sha384";
++		goto rsa_pkcs1;
++
++	case OID_sha512WithRSAEncryption:
++		ctx->cert->sig->hash_algo = "sha512";
++		goto rsa_pkcs1;
++
++	case OID_sha224WithRSAEncryption:
++		ctx->cert->sig->hash_algo = "sha224";
++		goto rsa_pkcs1;
++
++	case OID_id_ecdsa_with_sha1:
++		ctx->cert->sig->hash_algo = "sha1";
++		goto ecdsa;
++
++	case OID_id_ecdsa_with_sha224:
++		ctx->cert->sig->hash_algo = "sha224";
++		goto ecdsa;
++
++	case OID_id_ecdsa_with_sha256:
++		ctx->cert->sig->hash_algo = "sha256";
++		goto ecdsa;
++
++	case OID_id_ecdsa_with_sha384:
++		ctx->cert->sig->hash_algo = "sha384";
++		goto ecdsa;
++
++	case OID_id_ecdsa_with_sha512:
++		ctx->cert->sig->hash_algo = "sha512";
++		goto ecdsa;
++
++	case OID_gost2012Signature256:
++		ctx->cert->sig->hash_algo = "streebog256";
++		goto ecrdsa;
++
++	case OID_gost2012Signature512:
++		ctx->cert->sig->hash_algo = "streebog512";
++		goto ecrdsa;
++
++	case OID_SM2_with_SM3:
++		ctx->cert->sig->hash_algo = "sm3";
++		goto sm2;
++	}
++
++rsa_pkcs1:
++	ctx->cert->sig->pkey_algo = "rsa";
++	ctx->cert->sig->encoding = "pkcs1";
++	ctx->sig_algo = ctx->last_oid;
++	return 0;
++ecrdsa:
++	ctx->cert->sig->pkey_algo = "ecrdsa";
++	ctx->cert->sig->encoding = "raw";
++	ctx->sig_algo = ctx->last_oid;
++	return 0;
++sm2:
++	ctx->cert->sig->pkey_algo = "sm2";
++	ctx->cert->sig->encoding = "raw";
++	ctx->sig_algo = ctx->last_oid;
++	return 0;
++ecdsa:
++	ctx->cert->sig->pkey_algo = "ecdsa";
++	ctx->cert->sig->encoding = "x962";
++	ctx->sig_algo = ctx->last_oid;
++	return 0;
++}
++
++/*
++ * Note the whereabouts and type of the signature.
++ */
++int x509_note_signature(void *context, size_t hdrlen,
++			unsigned char tag,
++			const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++
++	_dl_debug_printf("Signature: alg=%u, size=%lu\n", ctx->last_oid, vlen);
++
++	/*
++	 * In X.509 certificates, the signature's algorithm is stored in two
++	 * places: inside the TBSCertificate (the data that is signed), and
++	 * alongside the signature.  These *must* match.
++	 */
++	if (ctx->last_oid != ctx->sig_algo) {
++		_dl_error_printf("signatureAlgorithm (%u) differs from tbsCertificate.signature (%u)\n",
++			ctx->last_oid, ctx->sig_algo);
++		return -EINVAL;
++	}
++
++	if (strcmp(ctx->cert->sig->pkey_algo, "rsa") == 0 ||
++	    strcmp(ctx->cert->sig->pkey_algo, "ecrdsa") == 0 ||
++	    strcmp(ctx->cert->sig->pkey_algo, "sm2") == 0 ||
++	    strcmp(ctx->cert->sig->pkey_algo, "ecdsa") == 0) {
++		/* Discard the BIT STRING metadata */
++		if (vlen < 1 || *(const u8 *)value != 0)
++			return -EBADMSG;
++
++		value++;
++		vlen--;
++	}
++
++	ctx->cert->raw_sig = value;
++	ctx->cert->raw_sig_size = vlen;
++	return 0;
++}
++
++int x509_note_subject(void *context, size_t hdrlen,
++		      unsigned char tag,
++		      const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++	ctx->cert->raw_subject = value;
++	ctx->cert->raw_subject_size = vlen;
++	return x509_fabricate_name(ctx, hdrlen, tag, &ctx->cert->subject, vlen);
++}
++
++/*
++ * Save the position of the TBS data so that we can check the signature over it
++ * later.
++ */
++int x509_note_tbs_certificate(void *context, size_t hdrlen,
++			      unsigned char tag,
++			      const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++
++	_dl_debug_printf("x509_note_tbs_certificate(,%zu,%x,%ld,%zu)!\n",
++		 hdrlen, tag, (unsigned long)value - ctx->data, vlen);
++
++	ctx->cert->tbs = value - hdrlen;
++	ctx->cert->tbs_size = vlen + hdrlen;
++	return 0;
++}
++
++/*
++ * Process certificate extensions that are used to qualify the certificate.
++ */
++int x509_process_extension(void *context, size_t hdrlen,
++			   unsigned char tag,
++			   const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++	struct asymmetric_key_id *kid;
++	const unsigned char *v = value;
++
++	_dl_debug_printf("Extension: %u\n", ctx->last_oid);
++
++	if (ctx->last_oid == OID_subjectKeyIdentifier) {
++		/* Get hold of the key fingerprint */
++		if (ctx->cert->skid || vlen < 3)
++			return -EBADMSG;
++		if (v[0] != ASN1_OTS || v[1] != vlen - 2)
++			return -EBADMSG;
++		v += 2;
++		vlen -= 2;
++
++		ctx->cert->raw_skid_size = vlen;
++		ctx->cert->raw_skid = v;
++		kid = asymmetric_key_generate_id(v, vlen, "", 0);
++		if (IS_ERR(kid))
++			return PTR_ERR(kid);
++		ctx->cert->skid = kid;
++		_dl_debug_printf("subjkeyid %d\n", kid->len);
++		return 0;
++	}
++
++	if (ctx->last_oid == OID_keyUsage) {
++		/*
++		 * Get hold of the keyUsage bit string
++		 * v[1] is the encoding size
++		 *       (Expect either 0x02 or 0x03, making it 1 or 2 bytes)
++		 * v[2] is the number of unused bits in the bit string
++		 *       (If >= 3 keyCertSign is missing when v[1] = 0x02)
++		 * v[3] and possibly v[4] contain the bit string
++		 *
++		 * From RFC 5280 4.2.1.3:
++		 *   0x04 is where keyCertSign lands in this bit string
++		 *   0x80 is where digitalSignature lands in this bit string
++		 */
++		if (v[0] != ASN1_BTS)
++			return -EBADMSG;
++		if (vlen < 4)
++			return -EBADMSG;
++		if (v[2] >= 8)
++			return -EBADMSG;
++		if (v[3] & 0x80)
++			ctx->cert->pub->key_eflags |= 1 << KEY_EFLAG_DIGITALSIG;
++		if (v[1] == 0x02 && v[2] <= 2 && (v[3] & 0x04))
++			ctx->cert->pub->key_eflags |= 1 << KEY_EFLAG_KEYCERTSIGN;
++		else if (vlen > 4 && v[1] == 0x03 && (v[3] & 0x04))
++			ctx->cert->pub->key_eflags |= 1 << KEY_EFLAG_KEYCERTSIGN;
++		return 0;
++	}
++
++	if (ctx->last_oid == OID_authorityKeyIdentifier) {
++		/* Get hold of the CA key fingerprint */
++		ctx->raw_akid = v;
++		ctx->raw_akid_size = vlen;
++		return 0;
++	}
++
++	if (ctx->last_oid == OID_basicConstraints) {
++		/*
++		 * Get hold of the basicConstraints
++		 * v[1] is the encoding size
++		 *	(Expect 0x2 or greater, making it 1 or more bytes)
++		 * v[2] is the encoding type
++		 *	(Expect an ASN1_BOOL for the CA)
++		 * v[3] is the contents of the ASN1_BOOL
++		 *      (Expect 1 if the CA is TRUE)
++		 * vlen should match the entire extension size
++		 */
++		if (v[0] != (ASN1_CONS_BIT | ASN1_SEQ))
++			return -EBADMSG;
++		if (vlen < 2)
++			return -EBADMSG;
++		if (v[1] != vlen - 2)
++			return -EBADMSG;
++		if (vlen >= 4 && v[1] != 0 && v[2] == ASN1_BOOL && v[3] == 1)
++			ctx->cert->pub->key_eflags |= 1 << KEY_EFLAG_CA;
++		return 0;
++	}
++
++	return 0;
++}
++
++/*
++ * Note a key identifier-based AuthorityKeyIdentifier
++ */
++int x509_akid_note_kid(void *context, size_t hdrlen,
++		       unsigned char tag,
++		       const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++	struct asymmetric_key_id *kid;
++
++	if (ctx->cert->sig->auth_ids[1])
++		return 0;
++
++	kid = asymmetric_key_generate_id(value, vlen, "", 0);
++	if (IS_ERR(kid))
++		return PTR_ERR(kid);
++
++	ctx->cert->sig->auth_ids[1] = kid;
++	return 0;
++}
++
++/*
++ * Note a serial number in an AuthorityKeyIdentifier
++ */
++int x509_akid_note_serial(void *context, size_t hdrlen,
++			  unsigned char tag,
++			  const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++	struct asymmetric_key_id *kid;
++
++	if (!ctx->akid_raw_issuer || ctx->cert->sig->auth_ids[0])
++		return 0;
++
++	kid = asymmetric_key_generate_id(value,
++					 vlen,
++					 ctx->akid_raw_issuer,
++					 ctx->akid_raw_issuer_size);
++	if (IS_ERR(kid))
++		return PTR_ERR(kid);
++
++	ctx->cert->sig->auth_ids[0] = kid;
++	return 0;
++}
++
++/*
++ * Note a directoryName in an AuthorityKeyIdentifier
++ */
++int x509_akid_note_name(void *context, size_t hdrlen,
++			unsigned char tag,
++			const void *value, size_t vlen)
++{
++	struct x509_parse_context *ctx = context;
++
++	ctx->akid_raw_issuer = value;
++	ctx->akid_raw_issuer_size = vlen;
++	return 0;
++}
++
++enum x509_actions {
++	ACT_x509_extract_key_data = 0,
++	ACT_x509_extract_name_segment = 1,
++	ACT_x509_note_OID = 2,
++	ACT_x509_note_issuer = 3,
++	ACT_x509_note_not_after = 4,
++	ACT_x509_note_not_before = 5,
++	ACT_x509_note_params = 6,
++	ACT_x509_note_serial = 7,
++	ACT_x509_note_sig_algo = 8,
++	ACT_x509_note_signature = 9,
++	ACT_x509_note_subject = 10,
++	ACT_x509_note_tbs_certificate = 11,
++	ACT_x509_process_extension = 12,
++	NR__x509_actions = 13
++};
++
++static asn1_action_t x509_action_table[NR__x509_actions] = {
++	[   0] = x509_extract_key_data,
++	[   1] = x509_extract_name_segment,
++	[   2] = x509_note_OID,
++	[   3] = x509_note_issuer,
++	[   4] = x509_note_not_after,
++	[   5] = x509_note_not_before,
++	[   6] = x509_note_params,
++	[   7] = x509_note_serial,
++	[   8] = x509_note_sig_algo,
++	[   9] = x509_note_signature,
++	[  10] = x509_note_subject,
++	[  11] = x509_note_tbs_certificate,
++	[  12] = x509_process_extension,
++};
++
++static unsigned char x509_machine[] = {
++	// Certificate
++	[   0] = ASN1_OP_MATCH,
++	[   1] = _tag(UNIV, CONS, SEQ),
++	// TBSCertificate
++	[   2] =  ASN1_OP_MATCH,
++	[   3] =  _tag(UNIV, CONS, SEQ),
++	[   4] =   ASN1_OP_MATCH_JUMP_OR_SKIP,		// version
++	[   5] =   _tagn(CONT, CONS,  0),
++	[   6] =   _jump_target(70),
++	// CertificateSerialNumber
++	[   7] =   ASN1_OP_MATCH,
++	[   8] =   _tag(UNIV, PRIM, INT),
++	[   9] =   ASN1_OP_ACT,
++	[  10] =   _action(ACT_x509_note_serial),
++	// AlgorithmIdentifier
++	[  11] =   ASN1_OP_MATCH_JUMP,
++	[  12] =   _tag(UNIV, CONS, SEQ),
++	[  13] =   _jump_target(74),		// --> AlgorithmIdentifier
++	[  14] =   ASN1_OP_ACT,
++	[  15] =   _action(ACT_x509_note_sig_algo),
++	// Name
++	[  16] =   ASN1_OP_MATCH_JUMP,
++	[  17] =   _tag(UNIV, CONS, SEQ),
++	[  18] =   _jump_target(81),		// --> Name
++	[  19] =   ASN1_OP_ACT,
++	[  20] =   _action(ACT_x509_note_issuer),
++	// Validity
++	[  21] =   ASN1_OP_MATCH,
++	[  22] =   _tag(UNIV, CONS, SEQ),
++	// Time
++	[  23] =    ASN1_OP_MATCH_OR_SKIP,		// utcTime
++	[  24] =    _tag(UNIV, PRIM, UNITIM),
++	[  25] =    ASN1_OP_COND_MATCH_OR_SKIP,		// generalTime
++	[  26] =    _tag(UNIV, PRIM, GENTIM),
++	[  27] =    ASN1_OP_COND_FAIL,
++	[  28] =    ASN1_OP_ACT,
++	[  29] =    _action(ACT_x509_note_not_before),
++	// Time
++	[  30] =    ASN1_OP_MATCH_OR_SKIP,		// utcTime
++	[  31] =    _tag(UNIV, PRIM, UNITIM),
++	[  32] =    ASN1_OP_COND_MATCH_OR_SKIP,		// generalTime
++	[  33] =    _tag(UNIV, PRIM, GENTIM),
++	[  34] =    ASN1_OP_COND_FAIL,
++	[  35] =    ASN1_OP_ACT,
++	[  36] =    _action(ACT_x509_note_not_after),
++	[  37] =   ASN1_OP_END_SEQ,
++	// Name
++	[  38] =   ASN1_OP_MATCH_JUMP,
++	[  39] =   _tag(UNIV, CONS, SEQ),
++	[  40] =   _jump_target(81),		// --> Name
++	[  41] =   ASN1_OP_ACT,
++	[  42] =   _action(ACT_x509_note_subject),
++	// SubjectPublicKeyInfo
++	[  43] =   ASN1_OP_MATCH,
++	[  44] =   _tag(UNIV, CONS, SEQ),
++	// AlgorithmIdentifier
++	[  45] =    ASN1_OP_MATCH_JUMP,
++	[  46] =    _tag(UNIV, CONS, SEQ),
++	[  47] =    _jump_target(74),		// --> AlgorithmIdentifier
++	[  48] =    ASN1_OP_MATCH_ACT,		// subjectPublicKey
++	[  49] =    _tag(UNIV, PRIM, BTS),
++	[  50] =    _action(ACT_x509_extract_key_data),
++	[  51] =   ASN1_OP_END_SEQ,
++	// UniqueIdentifier
++	[  52] =   ASN1_OP_MATCH_OR_SKIP,		// issuerUniqueID
++	[  53] =   _tagn(CONT, PRIM,  1),
++	// UniqueIdentifier
++	[  54] =   ASN1_OP_MATCH_OR_SKIP,		// subjectUniqueID
++	[  55] =   _tagn(CONT, PRIM,  2),
++	[  56] =   ASN1_OP_MATCH_JUMP_OR_SKIP,		// extensions
++	[  57] =   _tagn(CONT, CONS,  3),
++	[  58] =   _jump_target(96),
++	[  59] =  ASN1_OP_END_SEQ,
++	[  60] =  ASN1_OP_ACT,
++	[  61] =  _action(ACT_x509_note_tbs_certificate),
++	// AlgorithmIdentifier
++	[  62] =  ASN1_OP_MATCH_JUMP,
++	[  63] =  _tag(UNIV, CONS, SEQ),
++	[  64] =  _jump_target(74),		// --> AlgorithmIdentifier
++	[  65] =  ASN1_OP_MATCH_ACT,		// signature
++	[  66] =  _tag(UNIV, PRIM, BTS),
++	[  67] =  _action(ACT_x509_note_signature),
++	[  68] = ASN1_OP_END_SEQ,
++	[  69] = ASN1_OP_COMPLETE,
++
++	// Version
++	[  70] =  ASN1_OP_MATCH,
++	[  71] =  _tag(UNIV, PRIM, INT),
++	[  72] = ASN1_OP_END_SEQ,
++	[  73] = ASN1_OP_RETURN,
++
++	[  74] =  ASN1_OP_MATCH_ACT,		// algorithm
++	[  75] =  _tag(UNIV, PRIM, OID),
++	[  76] =  _action(ACT_x509_note_OID),
++	[  77] =  ASN1_OP_MATCH_ANY_ACT_OR_SKIP,		// parameters
++	[  78] =  _action(ACT_x509_note_params),
++	[  79] = ASN1_OP_END_SEQ,
++	[  80] = ASN1_OP_RETURN,
++
++	// RelativeDistinguishedName
++	[  81] =  ASN1_OP_MATCH,
++	[  82] =  _tag(UNIV, CONS, SET),
++	// AttributeValueAssertion
++	[  83] =   ASN1_OP_MATCH,
++	[  84] =   _tag(UNIV, CONS, SEQ),
++	[  85] =    ASN1_OP_MATCH_ACT,		// attributeType
++	[  86] =    _tag(UNIV, PRIM, OID),
++	[  87] =    _action(ACT_x509_note_OID),
++	[  88] =    ASN1_OP_MATCH_ANY_ACT,		// attributeValue
++	[  89] =    _action(ACT_x509_extract_name_segment),
++	[  90] =   ASN1_OP_END_SEQ,
++	[  91] =  ASN1_OP_END_SET_OF,
++	[  92] =  _jump_target(83),
++	[  93] = ASN1_OP_END_SEQ_OF,
++	[  94] = _jump_target(81),
++	[  95] = ASN1_OP_RETURN,
++
++	// Extensions
++	[  96] =  ASN1_OP_MATCH,
++	[  97] =  _tag(UNIV, CONS, SEQ),
++	// Extension
++	[  98] =   ASN1_OP_MATCH,
++	[  99] =   _tag(UNIV, CONS, SEQ),
++	[ 100] =    ASN1_OP_MATCH_ACT,		// extnid
++	[ 101] =    _tag(UNIV, PRIM, OID),
++	[ 102] =    _action(ACT_x509_note_OID),
++	[ 103] =    ASN1_OP_MATCH_OR_SKIP,		// critical
++	[ 104] =    _tag(UNIV, PRIM, BOOL),
++	[ 105] =    ASN1_OP_MATCH_ACT,		// extnValue
++	[ 106] =    _tag(UNIV, PRIM, OTS),
++	[ 107] =    _action(ACT_x509_process_extension),
++	[ 108] =   ASN1_OP_END_SEQ,
++	[ 109] =  ASN1_OP_END_SEQ_OF,
++	[ 110] =  _jump_target(98),
++	[ 111] = ASN1_OP_END_SEQ,
++	[ 112] = ASN1_OP_RETURN,
++};
++
++static struct asn1_decoder x509_decoder = {
++	.machine = x509_machine,
++	.machlen = sizeof(x509_machine),
++	.actions = x509_action_table,
++};
++
++#if 1
++enum x509_akid_actions {
++	ACT_x509_akid_note_kid = 0,
++	ACT_x509_akid_note_name = 1,
++	ACT_x509_akid_note_serial = 2,
++	ACT_x509_akid_extract_name_segment = 3,
++	ACT_x509_akid_note_OID = 4,
++	NR__x509_akid_actions = 5
++};
++
++static asn1_action_t x509_akid_action_table[NR__x509_akid_actions] = {
++	[   0] = x509_akid_note_kid,
++	[   1] = x509_akid_note_name,
++	[   2] = x509_akid_note_serial,
++	[   3] = x509_extract_name_segment,
++	[   4] = x509_note_OID,
++};
++
++static unsigned char x509_akid_machine[] = {
++	// AuthorityKeyIdentifier
++	[   0] = ASN1_OP_MATCH,
++	[   1] = _tag(UNIV, CONS, SEQ),
++	// KeyIdentifier
++	[   2] =  ASN1_OP_MATCH_ACT_OR_SKIP,		// keyIdentifier
++	[   3] =  _tagn(CONT, PRIM,  0),
++	[   4] =  _action(ACT_x509_akid_note_kid),
++	// GeneralNames
++	[   5] =  ASN1_OP_MATCH_JUMP_OR_SKIP,		// authorityCertIssuer
++	[   6] =  _tagn(CONT, CONS,  1),
++	[   7] =  _jump_target(13),		// --> GeneralNames
++	// CertificateSerialNumber
++	[   8] =  ASN1_OP_MATCH_ACT_OR_SKIP,		// authorityCertSerialNumber
++	[   9] =  _tagn(CONT, PRIM,  2),
++	[  10] =  _action(ACT_x509_akid_note_serial),
++	[  11] = ASN1_OP_END_SEQ,
++	[  12] = ASN1_OP_COMPLETE,
++
++	// GeneralName
++	[  13] =  ASN1_OP_MATCH_JUMP_OR_SKIP,		// otherName
++	[  14] =  _tagn(CONT, CONS,  0),
++	[  15] =  _jump_target(44),
++	[  16] =  ASN1_OP_COND_MATCH_JUMP_OR_SKIP,		// rfc822Name
++	[  17] =  _tagn(CONT, CONS,  1),
++	[  18] =  _jump_target(47),
++	[  19] =  ASN1_OP_COND_MATCH_JUMP_OR_SKIP,		// dNSName
++	[  20] =  _tagn(CONT, CONS,  2),
++	[  21] =  _jump_target(51),
++	[  22] =  ASN1_OP_COND_MATCH_JUMP_OR_SKIP,		// x400Address
++	[  23] =  _tagn(CONT, CONS,  3),
++	[  24] =  _jump_target(55),
++	[  25] =  ASN1_OP_COND_MATCH_JUMP_OR_SKIP,		// directoryName
++	[  26] =  _tagn(CONT, CONS,  4),
++	[  27] =  _jump_target(58),
++	[  28] =  ASN1_OP_COND_MATCH_JUMP_OR_SKIP,		// ediPartyName
++	[  29] =  _tagn(CONT, CONS,  5),
++	[  30] =  _jump_target(78),
++	[  31] =  ASN1_OP_COND_MATCH_JUMP_OR_SKIP,		// uniformResourceIdentifier
++	[  32] =  _tagn(CONT, CONS,  6),
++	[  33] =  _jump_target(81),
++	[  34] =  ASN1_OP_COND_MATCH_JUMP_OR_SKIP,		// iPAddress
++	[  35] =  _tagn(CONT, CONS,  7),
++	[  36] =  _jump_target(85),
++	[  37] =  ASN1_OP_COND_MATCH_JUMP_OR_SKIP,		// registeredID
++	[  38] =  _tagn(CONT, CONS,  8),
++	[  39] =  _jump_target(89),
++	[  40] =  ASN1_OP_COND_FAIL,
++	[  41] = ASN1_OP_END_SEQ_OF,
++	[  42] = _jump_target(13),
++	[  43] = ASN1_OP_RETURN,
++
++	[  44] =  ASN1_OP_MATCH_ANY,		// otherName
++	[  45] = ASN1_OP_END_SEQ,
++	[  46] = ASN1_OP_RETURN,
++
++	[  47] =  ASN1_OP_MATCH,		// rfc822Name
++	[  48] =  _tag(UNIV, PRIM, IA5STR),
++	[  49] = ASN1_OP_END_SEQ,
++	[  50] = ASN1_OP_RETURN,
++
++	[  51] =  ASN1_OP_MATCH,		// dNSName
++	[  52] =  _tag(UNIV, PRIM, IA5STR),
++	[  53] = ASN1_OP_END_SEQ,
++	[  54] = ASN1_OP_RETURN,
++
++	[  55] =  ASN1_OP_MATCH_ANY,		// x400Address
++	[  56] = ASN1_OP_END_SEQ,
++	[  57] = ASN1_OP_RETURN,
++
++	// Name
++	[  58] =  ASN1_OP_MATCH,
++	[  59] =  _tag(UNIV, CONS, SEQ),
++	// RelativeDistinguishedName
++	[  60] =   ASN1_OP_MATCH,
++	[  61] =   _tag(UNIV, CONS, SET),
++	// AttributeValueAssertion
++	[  62] =    ASN1_OP_MATCH,
++	[  63] =    _tag(UNIV, CONS, SEQ),
++	[  64] =     ASN1_OP_MATCH_ACT,		// attributeType
++	[  65] =     _tag(UNIV, PRIM, OID),
++	[  66] =     _action(ACT_x509_akid_note_OID),
++	[  67] =     ASN1_OP_MATCH_ANY_ACT,		// attributeValue
++	[  68] =     _action(ACT_x509_akid_extract_name_segment),
++	[  69] =    ASN1_OP_END_SEQ,
++	[  70] =   ASN1_OP_END_SET_OF,
++	[  71] =   _jump_target(62),
++	[  72] =  ASN1_OP_END_SEQ_OF,
++	[  73] =  _jump_target(60),
++	[  74] =  ASN1_OP_ACT,
++	[  75] =  _action(ACT_x509_akid_note_name),
++	[  76] = ASN1_OP_END_SEQ,
++	[  77] = ASN1_OP_RETURN,
++
++	[  78] =  ASN1_OP_MATCH_ANY,		// ediPartyName
++	[  79] = ASN1_OP_END_SEQ,
++	[  80] = ASN1_OP_RETURN,
++
++	[  81] =  ASN1_OP_MATCH,		// uniformResourceIdentifier
++	[  82] =  _tag(UNIV, PRIM, IA5STR),
++	[  83] = ASN1_OP_END_SEQ,
++	[  84] = ASN1_OP_RETURN,
++
++	[  85] =  ASN1_OP_MATCH,		// iPAddress
++	[  86] =  _tag(UNIV, PRIM, OTS),
++	[  87] = ASN1_OP_END_SEQ,
++	[  88] = ASN1_OP_RETURN,
++
++	[  89] =  ASN1_OP_MATCH,		// registeredID
++	[  90] =  _tag(UNIV, PRIM, OID),
++	[  91] = ASN1_OP_END_SEQ,
++	[  92] = ASN1_OP_RETURN,
++};
++
++struct asn1_decoder x509_akid_decoder = {
++	.machine = x509_akid_machine,
++	.machlen = sizeof(x509_akid_machine),
++	.actions = x509_akid_action_table,
++};
++#endif
++
++static unsigned char asn1_op_lengths[ASN1_OP__NR] = {
++	/*					OPC TAG JMP ACT */
++	[ASN1_OP_MATCH]				= 1 + 1,
++	[ASN1_OP_MATCH_OR_SKIP]			= 1 + 1,
++	[ASN1_OP_MATCH_ACT]			= 1 + 1     + 1,
++	[ASN1_OP_MATCH_ACT_OR_SKIP]		= 1 + 1     + 1,
++	[ASN1_OP_MATCH_JUMP]			= 1 + 1 + 1,
++	[ASN1_OP_MATCH_JUMP_OR_SKIP]		= 1 + 1 + 1,
++	[ASN1_OP_MATCH_ANY]			= 1,
++	[ASN1_OP_MATCH_ANY_OR_SKIP]		= 1,
++	[ASN1_OP_MATCH_ANY_ACT]			= 1         + 1,
++	[ASN1_OP_MATCH_ANY_ACT_OR_SKIP]		= 1         + 1,
++	[ASN1_OP_COND_MATCH_OR_SKIP]		= 1 + 1,
++	[ASN1_OP_COND_MATCH_ACT_OR_SKIP]	= 1 + 1     + 1,
++	[ASN1_OP_COND_MATCH_JUMP_OR_SKIP]	= 1 + 1 + 1,
++	[ASN1_OP_COND_MATCH_ANY]		= 1,
++	[ASN1_OP_COND_MATCH_ANY_OR_SKIP]	= 1,
++	[ASN1_OP_COND_MATCH_ANY_ACT]		= 1         + 1,
++	[ASN1_OP_COND_MATCH_ANY_ACT_OR_SKIP]	= 1         + 1,
++	[ASN1_OP_COND_FAIL]			= 1,
++	[ASN1_OP_COMPLETE]			= 1,
++	[ASN1_OP_ACT]				= 1         + 1,
++	[ASN1_OP_MAYBE_ACT]			= 1         + 1,
++	[ASN1_OP_RETURN]			= 1,
++	[ASN1_OP_END_SEQ]			= 1,
++	[ASN1_OP_END_SEQ_OF]			= 1     + 1,
++	[ASN1_OP_END_SET]			= 1,
++	[ASN1_OP_END_SET_OF]			= 1     + 1,
++	[ASN1_OP_END_SEQ_ACT]			= 1         + 1,
++	[ASN1_OP_END_SEQ_OF_ACT]		= 1     + 1 + 1,
++	[ASN1_OP_END_SET_ACT]			= 1         + 1,
++	[ASN1_OP_END_SET_OF_ACT]		= 1     + 1 + 1,
++};
++
++/*
++ * Find the length of an indefinite length object
++ * @data: The data buffer
++ * @datalen: The end of the innermost containing element in the buffer
++ * @_dp: The data parse cursor (updated before returning)
++ * @_len: Where to return the size of the element.
++ * @_errmsg: Where to return a pointer to an error message on error
++ */
++static int asn1_find_indefinite_length(const unsigned char *data, size_t datalen,
++				       size_t *_dp, size_t *_len,
++				       const char **_errmsg)
++{
++	unsigned char tag, tmp;
++	size_t dp = *_dp, len, n;
++	int indef_level = 1;
++
++next_tag:
++	if (__glibc_unlikely(datalen - dp < 2)) {
++		if (datalen == dp)
++			goto missing_eoc;
++		goto data_overrun_error;
++	}
++
++	/* Extract a tag from the data */
++	tag = data[dp++];
++	if (tag == ASN1_EOC) {
++		/* It appears to be an EOC. */
++		if (data[dp++] != 0)
++			goto invalid_eoc;
++		if (--indef_level <= 0) {
++			*_len = dp - *_dp;
++			*_dp = dp;
++			return 0;
++		}
++		goto next_tag;
++	}
++
++	if (__glibc_unlikely((tag & 0x1f) == ASN1_LONG_TAG)) {
++		do {
++			if (__glibc_unlikely(datalen - dp < 2))
++				goto data_overrun_error;
++			tmp = data[dp++];
++		} while (tmp & 0x80);
++	}
++
++	/* Extract the length */
++	len = data[dp++];
++	if (len <= 0x7f)
++		goto check_length;
++
++	if (__glibc_unlikely(len == ASN1_INDEFINITE_LENGTH)) {
++		/* Indefinite length */
++		if (__glibc_unlikely((tag & ASN1_CONS_BIT) == ASN1_PRIM << 5))
++			goto indefinite_len_primitive;
++		indef_level++;
++		goto next_tag;
++	}
++
++	n = len - 0x80;
++	if (__glibc_unlikely(n > sizeof(len) - 1))
++		goto length_too_long;
++	if (__glibc_unlikely(n > datalen - dp))
++		goto data_overrun_error;
++	len = 0;
++	for (; n > 0; n--) {
++		len <<= 8;
++		len |= data[dp++];
++	}
++check_length:
++	if (len > datalen - dp)
++		goto data_overrun_error;
++	dp += len;
++	goto next_tag;
++
++length_too_long:
++	*_errmsg = "Unsupported length";
++	goto error;
++indefinite_len_primitive:
++	*_errmsg = "Indefinite len primitive not permitted";
++	goto error;
++invalid_eoc:
++	*_errmsg = "Invalid length EOC";
++	goto error;
++data_overrun_error:
++	*_errmsg = "Data overrun error";
++	goto error;
++missing_eoc:
++	*_errmsg = "Missing EOC in indefinite len cons";
++error:
++	*_dp = dp;
++	return -1;
++}
++
++#define fallthrough
++
++/**
++ * asn1_ber_decoder - Decoder BER/DER/CER ASN.1 according to pattern
++ * @decoder: The decoder definition (produced by asn1_compiler)
++ * @context: The caller's context (to be passed to the action functions)
++ * @data: The encoded data
++ * @datalen: The size of the encoded data
++ *
++ * Decode BER/DER/CER encoded ASN.1 data according to a bytecode pattern
++ * produced by asn1_compiler.  Action functions are called on marked tags to
++ * allow the caller to retrieve significant data.
++ *
++ * LIMITATIONS:
++ *
++ * To keep down the amount of stack used by this function, the following limits
++ * have been imposed:
++ *
++ *  (1) This won't handle datalen > 65535 without increasing the size of the
++ *	cons stack elements and length_too_long checking.
++ *
++ *  (2) The stack of constructed types is 10 deep.  If the depth of non-leaf
++ *	constructed types exceeds this, the decode will fail.
++ *
++ *  (3) The SET type (not the SET OF type) isn't really supported as tracking
++ *	what members of the set have been seen is a pain.
++ */
++int asn1_ber_decoder(const struct asn1_decoder *decoder,
++		     void *context,
++		     const unsigned char *data,
++		     size_t datalen)
++{
++	const unsigned char *machine = decoder->machine;
++	const asn1_action_t *actions = decoder->actions;
++	size_t machlen = decoder->machlen;
++	enum asn1_opcode op;
++	unsigned char tag = 0, csp = 0, jsp = 0, optag = 0, hdr = 0;
++	const char *errmsg;
++	size_t pc = 0, dp = 0, tdp = 0, len = 0;
++	int ret;
++
++	unsigned char flags = 0;
++#define FLAG_INDEFINITE_LENGTH	0x01
++#define FLAG_MATCHED		0x02
++#define FLAG_LAST_MATCHED	0x04 /* Last tag matched */
++#define FLAG_CONS		0x20 /* Corresponds to CONS bit in the opcode tag
++				      * - ie. whether or not we are going to parse
++				      *   a compound type.
++				      */
++
++#define NR_CONS_STACK 10
++	unsigned short cons_dp_stack[NR_CONS_STACK];
++	unsigned short cons_datalen_stack[NR_CONS_STACK];
++	unsigned char cons_hdrlen_stack[NR_CONS_STACK];
++#define NR_JUMP_STACK 10
++	unsigned char jump_stack[NR_JUMP_STACK];
++
++	if (datalen > 65535)
++		return -EMSGSIZE;
++
++next_op:
++	if (__glibc_unlikely(pc >= machlen))
++		goto machine_overrun_error;
++	op = machine[pc];
++	_dl_debug_printf("asn1_ber_decoder state machine 0x%x and pc 0x%lx decoder 0x%lx\n", op, pc, (unsigned long)decoder);
++	if (__glibc_unlikely(pc + asn1_op_lengths[op] > machlen))
++		goto machine_overrun_error;
++
++	/* If this command is meant to match a tag, then do that before
++	 * evaluating the command.
++	 */
++	if (op <= ASN1_OP__MATCHES_TAG) {
++		unsigned char tmp;
++
++		/* Skip conditional matches if possible */
++		if ((op & ASN1_OP_MATCH__COND && flags & FLAG_MATCHED) ||
++		    (op & ASN1_OP_MATCH__SKIP && dp == datalen)) {
++			flags &= ~FLAG_LAST_MATCHED;
++			pc += asn1_op_lengths[op];
++			goto next_op;
++		}
++
++		flags = 0;
++		hdr = 2;
++
++		/* Extract a tag from the data */
++		if (__glibc_unlikely(datalen - dp < 2))
++			goto data_overrun_error;
++		tag = data[dp++];
++		if (__glibc_unlikely((tag & 0x1f) == ASN1_LONG_TAG))
++			goto long_tag_not_supported;
++
++		if (op & ASN1_OP_MATCH__ANY) {
++			_dl_debug_printf("- any %x\n", tag);
++		} else {
++			/* Extract the tag from the machine
++			 * - Either CONS or PRIM are permitted in the data if
++			 *   CONS is not set in the op stream, otherwise CONS
++			 *   is mandatory.
++			 */
++			optag = machine[pc + 1];
++			flags |= optag & FLAG_CONS;
++
++			_dl_debug_printf("%s:%d  machine 0x%lx\n", __func__, __LINE__, (unsigned long)machine);
++
++			/* Determine whether the tag matched */
++			tmp = optag ^ tag;
++			tmp &= ~(optag & ASN1_CONS_BIT);
++			_dl_debug_printf("- match %x %x %x\n", tag, optag, tmp);
++			if (tmp != 0) {
++				/* All odd-numbered tags are MATCH_OR_SKIP. */
++				if (op & ASN1_OP_MATCH__SKIP) {
++					pc += asn1_op_lengths[op];
++					dp--;
++					goto next_op;
++				}
++				goto tag_mismatch;
++			}
++		}
++		flags |= FLAG_MATCHED;
++
++		len = data[dp++];
++		if (len > 0x7f) {
++			if (__glibc_unlikely(len == ASN1_INDEFINITE_LENGTH)) {
++				/* Indefinite length */
++				if (__glibc_unlikely(!(tag & ASN1_CONS_BIT)))
++					goto indefinite_len_primitive;
++				flags |= FLAG_INDEFINITE_LENGTH;
++				if (__glibc_unlikely(2 > datalen - dp))
++					goto data_overrun_error;
++			} else {
++				int n = len - 0x80;
++				if (__glibc_unlikely(n > 2))
++					goto length_too_long;
++				if (__glibc_unlikely(n > datalen - dp))
++					goto data_overrun_error;
++				hdr += n;
++				for (len = 0; n > 0; n--) {
++					len <<= 8;
++					len |= data[dp++];
++				}
++				if (__glibc_unlikely(len > datalen - dp))
++					goto data_overrun_error;
++			}
++		} else {
++			if (__glibc_unlikely(len > datalen - dp))
++				goto data_overrun_error;
++		}
++
++		if (flags & FLAG_CONS) {
++			/* For expected compound forms, we stack the positions
++			 * of the start and end of the data.
++			 */
++			if (__glibc_unlikely(csp >= NR_CONS_STACK))
++				goto cons_stack_overflow;
++			cons_dp_stack[csp] = dp;
++			cons_hdrlen_stack[csp] = hdr;
++			if (!(flags & FLAG_INDEFINITE_LENGTH)) {
++				cons_datalen_stack[csp] = datalen;
++				datalen = dp + len;
++			} else {
++				cons_datalen_stack[csp] = 0;
++			}
++			csp++;
++		}
++
++		tdp = dp;
++	}
++
++	/* Decide how to handle the operation */
++	switch (op) {
++	case ASN1_OP_MATCH:
++	case ASN1_OP_MATCH_OR_SKIP:
++	case ASN1_OP_MATCH_ACT:
++	case ASN1_OP_MATCH_ACT_OR_SKIP:
++	case ASN1_OP_MATCH_ANY:
++	case ASN1_OP_MATCH_ANY_OR_SKIP:
++	case ASN1_OP_MATCH_ANY_ACT:
++	case ASN1_OP_MATCH_ANY_ACT_OR_SKIP:
++	case ASN1_OP_COND_MATCH_OR_SKIP:
++	case ASN1_OP_COND_MATCH_ACT_OR_SKIP:
++	case ASN1_OP_COND_MATCH_ANY:
++	case ASN1_OP_COND_MATCH_ANY_OR_SKIP:
++	case ASN1_OP_COND_MATCH_ANY_ACT:
++	case ASN1_OP_COND_MATCH_ANY_ACT_OR_SKIP:
++
++		if (!(flags & FLAG_CONS)) {
++			if (flags & FLAG_INDEFINITE_LENGTH) {
++				size_t tmp = dp;
++
++				ret = asn1_find_indefinite_length(
++					data, datalen, &tmp, &len, &errmsg);
++				if (ret < 0)
++					goto error;
++			}
++			_dl_debug_printf("- LEAF: %zu\n", len);
++		}
++
++		if (op & ASN1_OP_MATCH__ACT) {
++			unsigned char act;
++
++			if (op & ASN1_OP_MATCH__ANY)
++				act = machine[pc + 1];
++			else
++				act = machine[pc + 2];
++			ret = actions[act](context, hdr, tag, data + dp, len);
++			if (ret < 0)
++				return ret;
++		}
++
++		if (!(flags & FLAG_CONS))
++			dp += len;
++		pc += asn1_op_lengths[op];
++		goto next_op;
++
++	case ASN1_OP_MATCH_JUMP:
++	case ASN1_OP_MATCH_JUMP_OR_SKIP:
++	case ASN1_OP_COND_MATCH_JUMP_OR_SKIP:
++		_dl_debug_printf("- MATCH_JUMP\n");
++		if (__glibc_unlikely(jsp == NR_JUMP_STACK))
++			goto jump_stack_overflow;
++		jump_stack[jsp++] = pc + asn1_op_lengths[op];
++		pc = machine[pc + 2];
++		goto next_op;
++
++	case ASN1_OP_COND_FAIL:
++		if (__glibc_unlikely(!(flags & FLAG_MATCHED)))
++			goto tag_mismatch;
++		pc += asn1_op_lengths[op];
++		goto next_op;
++
++	case ASN1_OP_COMPLETE:
++		if (__glibc_unlikely(jsp != 0 || csp != 0)) {
++			_dl_error_printf("ASN.1 decoder error: Stacks not empty at completion (%u, %u)\n",
++			       jsp, csp);
++			return -EBADMSG;
++		}
++		return 0;
++
++	case ASN1_OP_END_SET:
++	case ASN1_OP_END_SET_ACT:
++		if (__glibc_unlikely(!(flags & FLAG_MATCHED)))
++			goto tag_mismatch;
++		fallthrough;
++
++	case ASN1_OP_END_SEQ:
++	case ASN1_OP_END_SET_OF:
++	case ASN1_OP_END_SEQ_OF:
++	case ASN1_OP_END_SEQ_ACT:
++	case ASN1_OP_END_SET_OF_ACT:
++	case ASN1_OP_END_SEQ_OF_ACT:
++		if (__glibc_unlikely(csp <= 0))
++			goto cons_stack_underflow;
++		csp--;
++		tdp = cons_dp_stack[csp];
++		hdr = cons_hdrlen_stack[csp];
++		len = datalen;
++		datalen = cons_datalen_stack[csp];
++		if (datalen == 0) {
++			/* Indefinite length - check for the EOC. */
++			datalen = len;
++			if (__glibc_unlikely(datalen - dp < 2))
++				goto data_overrun_error;
++			if (data[dp++] != 0) {
++				if (op & ASN1_OP_END__OF) {
++					dp--;
++					csp++;
++					pc = machine[pc + 1];
++					_dl_debug_printf("- continue\n");
++					goto next_op;
++				}
++				goto missing_eoc;
++			}
++			if (data[dp++] != 0)
++				goto invalid_eoc;
++			len = dp - tdp - 2;
++		} else {
++			if (dp < len && (op & ASN1_OP_END__OF)) {
++				datalen = len;
++				csp++;
++				pc = machine[pc + 1];
++			    _dl_debug_printf("- continue\n");
++				goto next_op;
++			}
++			if (dp != len)
++				goto cons_length_error;
++			len -= tdp;
++		}
++
++		if (op & ASN1_OP_END__ACT) {
++			unsigned char act;
++			if (op & ASN1_OP_END__OF)
++				act = machine[pc + 2];
++			else
++				act = machine[pc + 1];
++			ret = actions[act](context, hdr, 0, data + tdp, len);
++			if (ret < 0)
++				return ret;
++		}
++		pc += asn1_op_lengths[op];
++		goto next_op;
++
++	case ASN1_OP_MAYBE_ACT:
++		if (!(flags & FLAG_LAST_MATCHED)) {
++			pc += asn1_op_lengths[op];
++			goto next_op;
++		}
++		fallthrough;
++
++	case ASN1_OP_ACT:
++		ret = actions[machine[pc + 1]](context, hdr, tag, data + tdp, len);
++		if (ret < 0)
++			return ret;
++		pc += asn1_op_lengths[op];
++		goto next_op;
++
++	case ASN1_OP_RETURN:
++		if (__glibc_unlikely(jsp <= 0))
++			goto jump_stack_underflow;
++		pc = jump_stack[--jsp];
++		flags |= FLAG_MATCHED | FLAG_LAST_MATCHED;
++		goto next_op;
++
++	default:
++		break;
++	}
++
++	/* Shouldn't reach here */
++	_dl_error_printf("ASN.1 decoder error: Found reserved opcode \n");
++	return -EBADMSG;
++
++data_overrun_error:
++	errmsg = "Data overrun error";
++	goto error;
++machine_overrun_error:
++	errmsg = "Machine overrun error";
++	goto error;
++jump_stack_underflow:
++	errmsg = "Jump stack underflow";
++	goto error;
++jump_stack_overflow:
++	errmsg = "Jump stack overflow";
++	goto error;
++cons_stack_underflow:
++	errmsg = "Cons stack underflow";
++	goto error;
++cons_stack_overflow:
++	errmsg = "Cons stack overflow";
++	goto error;
++cons_length_error:
++	errmsg = "Cons length error";
++	goto error;
++missing_eoc:
++	errmsg = "Missing EOC in indefinite len cons";
++	goto error;
++invalid_eoc:
++	errmsg = "Invalid length EOC";
++	goto error;
++length_too_long:
++	errmsg = "Unsupported length";
++	goto error;
++indefinite_len_primitive:
++	errmsg = "Indefinite len primitive not permitted";
++	goto error;
++tag_mismatch:
++	errmsg = "Unexpected tag";
++	goto error;
++long_tag_not_supported:
++	errmsg = "Long tag not supported";
++error:
++	_dl_error_printf("\n %s:%d ASN1: %s \n", __func__, __LINE__, errmsg);
++	return -EBADMSG;
++}
++
++/*
++ * Destroy a public key algorithm key.
++ */
++void public_key_free(struct public_key *key)
++{
++	if (key) {
++		free(key->key);
++		free(key->params);
++		free(key);
++	}
++}
++
++/*
++ * Destroy a public key signature.
++ */
++void public_key_signature_free(struct public_key_signature *sig)
++{
++	int i;
++
++	if (sig) {
++		for (i = 0; i < ARRAY_SIZE(sig->auth_ids); i++)
++			free(sig->auth_ids[i]);
++		free(sig->s);
++		free(sig->digest);
++		free(sig);
++	}
++}
++
++void x509_free_certificate(struct x509_certificate *cert)
++{
++	if (cert) {
++		public_key_free(cert->pub);
++		public_key_signature_free(cert->sig);
++		free(cert->issuer);
++		free(cert->subject);
++		free(cert->id);
++		free(cert->skid);
++		free(cert);
++	}
++}
++
++static inline void *kzalloc(size_t len) {
++  void *ptr = malloc(len);
++  if (ptr) {
++    memset(ptr, 0, len);
++  }
++
++  return ptr;
++}
++
++static inline void *kmemdup(const void *src, size_t len)
++{
++	void *p;
++
++	p = malloc(len);
++	if (p)
++		memcpy(p, src, len);
++
++	return p;
++}
++
++/*
++ * Parse an X.509 certificate
++ */
++struct x509_certificate *x509_cert_parse(const void *data, size_t datalen)
++{
++	struct x509_certificate *cert;
++	struct x509_parse_context *ctx;
++	long ret;
++
++	ret = -ENOMEM;
++	cert = kzalloc(sizeof(struct x509_certificate));
++	if (!cert)
++		goto error_no_cert;
++	cert->pub = kzalloc(sizeof(struct public_key));
++	if (!cert->pub)
++		goto error_no_ctx;
++	cert->sig = kzalloc(sizeof(struct public_key_signature));
++	if (!cert->sig)
++		goto error_no_ctx;
++	ctx = kzalloc(sizeof(struct x509_parse_context));
++	if (!ctx)
++		goto error_no_ctx;
++
++	ctx->cert = cert;
++	ctx->data = (unsigned long)data;
++
++
++	/* Attempt to decode the certificate */
++	ret = asn1_ber_decoder(&x509_decoder, ctx, data, datalen);
++	if (ret < 0)
++		goto error_decode;
++
++	/* Decode the AuthorityKeyIdentifier */
++	if (ctx->raw_akid) {
++		ret = asn1_ber_decoder(&x509_akid_decoder, ctx,
++				       ctx->raw_akid, ctx->raw_akid_size);
++		if (ret < 0) {
++			_dl_error_printf("Couldn't decode AuthKeyIdentifier\n");
++			goto error_decode;
++		}
++	}
++
++	ret = -ENOMEM;
++	cert->pub->key = kmemdup(ctx->key, ctx->key_size);
++	if (!cert->pub->key)
++		goto error_decode;
++
++	cert->pub->keylen = ctx->key_size;
++
++	cert->pub->params = kmemdup(ctx->params, ctx->params_size);
++	if (!cert->pub->params)
++		goto error_decode;
++
++	cert->pub->paramlen = ctx->params_size;
++	cert->pub->algo = ctx->key_algo;
++
++	free(ctx);
++	return cert;
++
++error_decode:
++	free(ctx);
++error_no_ctx:
++	x509_free_certificate(cert);
++error_no_cert:
++	return ERR_PTR(ret);
++}
++
++
++/* RSA */
++#define BITS_PER_LONG 64
++#define BYTES_PER_MPI_LIMB	(BITS_PER_LONG / 8)
++#define BITS_PER_MPI_LIMB	BITS_PER_LONG
++#define W_TYPE_SIZE BITS_PER_MPI_LIMB
++
++typedef unsigned long int mpi_limb_t;
++typedef signed long int mpi_limb_signed_t;
++typedef mpi_limb_t *mpi_ptr_t;	/* pointer to a limb */
++typedef int mpi_size_t;		/* (must be a signed type) */
++
++typedef mpi_limb_t UWtype;
++typedef unsigned int UHWtype;
++#define __BITS4 (W_TYPE_SIZE / 4)
++#define __ll_B ((UWtype) 1 << (W_TYPE_SIZE / 2))
++#define __ll_lowpart(t) ((UWtype) (t) & (__ll_B - 1))
++#define __ll_highpart(t) ((UWtype) (t) >> (W_TYPE_SIZE / 2))
++
++struct gcry_mpi {
++	int alloced;		/* array size (# of allocated limbs) */
++	int nlimbs;		/* number of valid limbs */
++	int nbits;		/* the real number of valid bits (info only) */
++	int sign;		/* indicates a negative number */
++	unsigned flags;		/* bit 0: array must be allocated in secure memory space */
++	/* bit 1: not used */
++	/* bit 2: the limb is a pointer to some m_alloced data */
++	mpi_limb_t *d;		/* array with the limbs */
++};
++
++typedef struct gcry_mpi *MPI;
++
++#define MPN_COPY(d, s, n) \
++	do {					\
++		mpi_size_t _i;			\
++		for (_i = 0; _i < (n); _i++)	\
++			(d)[_i] = (s)[_i];	\
++	} while (0)
++
++#define MPN_COPY_INCR(d, s, n)		\
++	do {					\
++		mpi_size_t _i;			\
++		for (_i = 0; _i < (n); _i++)	\
++			(d)[_i] = (s)[_i];	\
++	} while (0)
++
++
++#define MPN_COPY_DECR(d, s, n) \
++	do {					\
++		mpi_size_t _i;			\
++		for (_i = (n)-1; _i >= 0; _i--) \
++			(d)[_i] = (s)[_i];	\
++	} while (0)
++
++/* Zero N limbs at D */
++#define MPN_ZERO(d, n) \
++	do {					\
++		int  _i;			\
++		for (_i = 0; _i < (n); _i++)	\
++			(d)[_i] = 0;		\
++	} while (0)
++
++#define MPN_NORMALIZE(d, n)  \
++	do {					\
++		while ((n) > 0) {		\
++			if ((d)[(n)-1])		\
++				break;		\
++			(n)--;			\
++		}				\
++	} while (0)
++
++#define add_ssaaaa(sh, sl, ah, al, bh, bl) \
++do { \
++	UWtype __x; \
++	__x = (al) + (bl); \
++	(sh) = (ah) + (bh) + (__x < (al)); \
++	(sl) = __x; \
++} while (0)
++
++#define sub_ddmmss(sh, sl, ah, al, bh, bl) \
++do { \
++	UWtype __x; \
++	__x = (al) - (bl); \
++	(sh) = (ah) - (bh) - (__x > (al)); \
++	(sl) = __x; \
++} while (0)
++
++#define umul_ppmm(w1, w0, u, v) \
++do { \
++	UWtype __x0, __x1, __x2, __x3; \
++	UHWtype __ul, __vl, __uh, __vh; \
++	UWtype __u = (u), __v = (v); \
++	\
++	__ul = __ll_lowpart(__u); \
++	__uh = __ll_highpart(__u); \
++	__vl = __ll_lowpart(__v); \
++	__vh = __ll_highpart(__v); \
++	\
++	__x0 = (UWtype) __ul * __vl; \
++	__x1 = (UWtype) __ul * __vh; \
++	__x2 = (UWtype) __uh * __vl; \
++	__x3 = (UWtype) __uh * __vh; \
++	\
++	__x1 += __ll_highpart(__x0);/* this can't give carry */ \
++	__x1 += __x2;		/* but this indeed can */ \
++	if (__x1 < __x2)		/* did we get it? */ \
++	__x3 += __ll_B;		/* yes, add it in the proper pos. */ \
++	\
++	(w1) = __x3 + __ll_highpart(__x1); \
++	(w0) = (__ll_lowpart(__x1) << W_TYPE_SIZE/2) + __ll_lowpart(__x0); \
++} while (0)
++
++#define smul_ppmm(w1, w0, u, v) \
++do { \
++	UWtype __w1; \
++	UWtype __m0 = (u), __m1 = (v); \
++	umul_ppmm(__w1, w0, __m0, __m1); \
++	(w1) = __w1 - (-(__m0 >> (W_TYPE_SIZE - 1)) & __m1) \
++	- (-(__m1 >> (W_TYPE_SIZE - 1)) & __m0); \
++} while (0)
++
++	/* Define this unconditionally, so it can be used for debugging.  */
++#define __udiv_qrnnd_c(q, r, n1, n0, d) \
++do { \
++	UWtype __d1, __d0, __q1, __q0, __r1, __r0, __m; \
++	__d1 = __ll_highpart(d); \
++	__d0 = __ll_lowpart(d); \
++	\
++	__r1 = (n1) % __d1; \
++	__q1 = (n1) / __d1; \
++	__m = (UWtype) __q1 * __d0; \
++	__r1 = __r1 * __ll_B | __ll_highpart(n0); \
++	if (__r1 < __m) { \
++		__q1--, __r1 += (d); \
++		if (__r1 >= (d)) /* i.e. we didn't get carry when adding to __r1 */ \
++		if (__r1 < __m) \
++			__q1--, __r1 += (d); \
++	} \
++	__r1 -= __m; \
++	\
++	__r0 = __r1 % __d1; \
++	__q0 = __r1 / __d1; \
++	__m = (UWtype) __q0 * __d0; \
++	__r0 = __r0 * __ll_B | __ll_lowpart(n0); \
++	if (__r0 < __m) { \
++		__q0--, __r0 += (d); \
++		if (__r0 >= (d)) \
++			if (__r0 < __m) \
++				__q0--, __r0 += (d); \
++	} \
++	__r0 -= __m; \
++	\
++	(q) = (UWtype) __q1 * __ll_B | __q0; \
++	(r) = __r0; \
++} while (0)
++
++#define UDIV_NEEDS_NORMALIZATION 1
++#define udiv_qrnnd __udiv_qrnnd_c
++
++#define DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
++
++struct rsa_mpi_key {
++	MPI n;
++	MPI e;
++	MPI d;
++	MPI p;
++	MPI q;
++	MPI dp;
++	MPI dq;
++	MPI qinv;
++};
++
++void mpi_normalize(MPI a)
++{
++	for (; a->nlimbs && !a->d[a->nlimbs - 1]; a->nlimbs--)
++		;
++}
++
++int mpi_cmp_ui(MPI u, unsigned long v)
++{
++	mpi_limb_t limb = v;
++
++	mpi_normalize(u);
++	if (!u->nlimbs && !limb)
++		return 0;
++	if (u->sign)
++		return -1;
++	if (u->nlimbs > 1)
++		return 1;
++
++	if (u->d[0] == limb)
++		return 0;
++	else if (u->d[0] > limb)
++		return 1;
++	else
++		return -1;
++}
++
++int mpihelp_cmp(mpi_ptr_t op1_ptr, mpi_ptr_t op2_ptr, mpi_size_t size)
++{
++	mpi_size_t i;
++	mpi_limb_t op1_word, op2_word;
++
++	for (i = size - 1; i >= 0; i--) {
++		op1_word = op1_ptr[i];
++		op2_word = op2_ptr[i];
++		if (op1_word != op2_word)
++			goto diff;
++	}
++	return 0;
++
++diff:
++	/* This can *not* be simplified to
++	 *   op2_word - op2_word
++	 * since that expression might give signed overflow.  */
++	return (op1_word > op2_word) ? 1 : -1;
++}
++
++static int do_mpi_cmp(MPI u, MPI v, int absmode)
++{
++	mpi_size_t usize;
++	mpi_size_t vsize;
++	int usign;
++	int vsign;
++	int cmp;
++
++	mpi_normalize(u);
++	mpi_normalize(v);
++
++	usize = u->nlimbs;
++	vsize = v->nlimbs;
++	usign = absmode ? 0 : u->sign;
++	vsign = absmode ? 0 : v->sign;
++
++	/* Compare sign bits.  */
++
++	if (!usign && vsign)
++		return 1;
++	if (usign && !vsign)
++		return -1;
++
++	/* U and V are either both positive or both negative.  */
++
++	if (usize != vsize && !usign && !vsign)
++		return usize - vsize;
++	if (usize != vsize && usign && vsign)
++		return vsize + usize;
++	if (!usize)
++		return 0;
++	cmp = mpihelp_cmp(u->d, v->d, usize);
++	if (!cmp)
++		return 0;
++	if ((cmp < 0?1:0) == (usign?1:0))
++		return 1;
++
++	return -1;
++}
++
++int mpi_cmp(MPI u, MPI v)
++{
++	return do_mpi_cmp(u, v, 0);
++}
++
++struct karatsuba_ctx {
++	struct karatsuba_ctx *next;
++	mpi_ptr_t tspace;
++	mpi_size_t tspace_size;
++	mpi_ptr_t tp;
++	mpi_size_t tp_size;
++};
++
++static inline void *malloc_array(size_t n, size_t size)
++{
++	if (size != 0 && n > SIZE_MAX / size)
++		return NULL;
++	return malloc(n * size);
++}
++
++static inline void *kcalloc(size_t n, size_t size)
++{
++	return malloc_array(n, size);
++}
++
++mpi_ptr_t mpi_alloc_limb_space(unsigned nlimbs)
++{
++	size_t len = nlimbs * sizeof(mpi_limb_t);
++
++	if (!len)
++		return NULL;
++
++	return malloc(len);
++}
++
++
++void mpi_free_limb_space(mpi_ptr_t a)
++{
++	if (!a)
++		return;
++
++	free(a);
++}
++
++static __always_inline int fls(unsigned int x)
++{
++	int r = 32;
++
++	if (!x)
++		return 0;
++	if (!(x & 0xffff0000u)) {
++		x <<= 16;
++		r -= 16;
++	}
++	if (!(x & 0xff000000u)) {
++		x <<= 8;
++		r -= 8;
++	}
++	if (!(x & 0xf0000000u)) {
++		x <<= 4;
++		r -= 4;
++	}
++	if (!(x & 0xc0000000u)) {
++		x <<= 2;
++		r -= 2;
++	}
++	if (!(x & 0x80000000u)) {
++		x <<= 1;
++		r -= 1;
++	}
++	return r;
++}
++
++static __always_inline unsigned long __fls(unsigned long word)
++{
++	int num = BITS_PER_LONG - 1;
++
++#if BITS_PER_LONG == 64
++	if (!(word & (~0ul << 32))) {
++		num -= 32;
++		word <<= 32;
++	}
++#endif
++	if (!(word & (~0ul << (BITS_PER_LONG-16)))) {
++		num -= 16;
++		word <<= 16;
++	}
++	if (!(word & (~0ul << (BITS_PER_LONG-8)))) {
++		num -= 8;
++		word <<= 8;
++	}
++	if (!(word & (~0ul << (BITS_PER_LONG-4)))) {
++		num -= 4;
++		word <<= 4;
++	}
++	if (!(word & (~0ul << (BITS_PER_LONG-2)))) {
++		num -= 2;
++		word <<= 2;
++	}
++	if (!(word & (~0ul << (BITS_PER_LONG-1))))
++		num -= 1;
++	return num;
++}
++
++static __always_inline int fls64(u64 x)
++{
++	if (x == 0)
++		return 0;
++	return __fls(x) + 1;
++}
++
++static inline int count_leading_zeros(unsigned long x)
++{
++	if (sizeof(x) == 4)
++		return BITS_PER_LONG - fls(x);
++	else
++		return BITS_PER_LONG - fls64(x);
++}
++
++mpi_limb_t
++mpihelp_lshift(mpi_ptr_t wp, mpi_ptr_t up, mpi_size_t usize, unsigned int cnt)
++{
++	mpi_limb_t high_limb, low_limb;
++	unsigned sh_1, sh_2;
++	mpi_size_t i;
++	mpi_limb_t retval;
++
++	sh_1 = cnt;
++	wp += 1;
++	sh_2 = BITS_PER_MPI_LIMB - sh_1;
++	i = usize - 1;
++	low_limb = up[i];
++	retval = low_limb >> sh_2;
++	high_limb = low_limb;
++	while (--i >= 0) {
++		low_limb = up[i];
++		wp[i] = (high_limb << sh_1) | (low_limb >> sh_2);
++		high_limb = low_limb;
++	}
++	wp[i] = high_limb << sh_1;
++
++	return retval;
++}
++
++mpi_limb_t
++mpihelp_rshift(mpi_ptr_t wp, mpi_ptr_t up, mpi_size_t usize, unsigned cnt)
++{
++	mpi_limb_t high_limb, low_limb;
++	unsigned sh_1, sh_2;
++	mpi_size_t i;
++	mpi_limb_t retval;
++
++	sh_1 = cnt;
++	wp -= 1;
++	sh_2 = BITS_PER_MPI_LIMB - sh_1;
++	high_limb = up[0];
++	retval = high_limb << sh_2;
++	low_limb = high_limb;
++	for (i = 1; i < usize; i++) {
++		high_limb = up[i];
++		wp[i] = (low_limb >> sh_1) | (high_limb << sh_2);
++		low_limb = high_limb;
++	}
++	wp[i] = low_limb >> sh_1;
++
++	return retval;
++}
++
++/****************
++ * Resize the array of A to NLIMBS. the additional space is cleared
++ * (set to 0) [done by m_realloc()]
++ */
++int mpi_resize(MPI a, unsigned nlimbs)
++{
++	void *p;
++
++	if (nlimbs <= a->alloced)
++		return 0;	/* no need to do it */
++
++	if (a->d) {
++		p = kcalloc(nlimbs, sizeof(mpi_limb_t));
++		if (!p)
++			return -ENOMEM;
++		memcpy(p, a->d, a->alloced * sizeof(mpi_limb_t));
++		free(a->d);
++		a->d = p;
++	} else {
++		a->d = kcalloc(nlimbs, sizeof(mpi_limb_t));
++		if (!a->d)
++			return -ENOMEM;
++	}
++	a->alloced = nlimbs;
++	return 0;
++}
++
++mpi_limb_t
++mpihelp_sub_n(mpi_ptr_t res_ptr, mpi_ptr_t s1_ptr,
++	      mpi_ptr_t s2_ptr, mpi_size_t size)
++{
++	mpi_limb_t x, y, cy;
++	mpi_size_t j;
++
++	/* The loop counter and index J goes from -SIZE to -1.  This way
++	   the loop becomes faster.  */
++	j = -size;
++
++	/* Offset the base pointers to compensate for the negative indices.  */
++	s1_ptr -= j;
++	s2_ptr -= j;
++	res_ptr -= j;
++
++	cy = 0;
++	do {
++		y = s2_ptr[j];
++		x = s1_ptr[j];
++		y += cy;	/* add previous carry to subtrahend */
++		cy = y < cy;	/* get out carry from that addition */
++		y = x - y;	/* main subtract */
++		cy += y > x;	/* get out carry from the subtract, combine */
++		res_ptr[j] = y;
++	} while (++j);
++
++	return cy;
++}
++
++
++mpi_limb_t
++mpihelp_submul_1(mpi_ptr_t res_ptr, mpi_ptr_t s1_ptr,
++		 mpi_size_t s1_size, mpi_limb_t s2_limb)
++{
++	mpi_limb_t cy_limb;
++	mpi_size_t j;
++	mpi_limb_t prod_high, prod_low;
++	mpi_limb_t x;
++
++	/* The loop counter and index J goes from -SIZE to -1.  This way
++	 * the loop becomes faster.  */
++	j = -s1_size;
++	res_ptr -= j;
++	s1_ptr -= j;
++
++	cy_limb = 0;
++	do {
++		umul_ppmm(prod_high, prod_low, s1_ptr[j], s2_limb);
++
++		prod_low += cy_limb;
++		cy_limb = (prod_low < cy_limb ? 1 : 0) + prod_high;
++
++		x = res_ptr[j];
++		prod_low = x - prod_low;
++		cy_limb += prod_low > x ? 1 : 0;
++		res_ptr[j] = prod_low;
++	} while (++j);
++
++	return cy_limb;
++}
++
++mpi_limb_t
++mpihelp_add_n(mpi_ptr_t res_ptr, mpi_ptr_t s1_ptr,
++	      mpi_ptr_t s2_ptr, mpi_size_t size)
++{
++	mpi_limb_t x, y, cy;
++	mpi_size_t j;
++
++	/* The loop counter and index J goes from -SIZE to -1.  This way
++	   the loop becomes faster.  */
++	j = -size;
++
++	/* Offset the base pointers to compensate for the negative indices. */
++	s1_ptr -= j;
++	s2_ptr -= j;
++	res_ptr -= j;
++
++	cy = 0;
++	do {
++		y = s2_ptr[j];
++		x = s1_ptr[j];
++		y += cy;	/* add previous carry to one addend */
++		cy = y < cy;	/* get out carry from that addition */
++		y += x;		/* add other addend */
++		cy += y < x;	/* get out carry from that add, combine */
++		res_ptr[j] = y;
++	} while (++j);
++
++	return cy;
++}
++
++mpi_limb_t
++mpihelp_addmul_1(mpi_ptr_t res_ptr, mpi_ptr_t s1_ptr,
++		 mpi_size_t s1_size, mpi_limb_t s2_limb)
++{
++	mpi_limb_t cy_limb;
++	mpi_size_t j;
++	mpi_limb_t prod_high, prod_low;
++	mpi_limb_t x;
++
++	/* The loop counter and index J goes from -SIZE to -1.  This way
++	 * the loop becomes faster.  */
++	j = -s1_size;
++	res_ptr -= j;
++	s1_ptr -= j;
++
++	cy_limb = 0;
++	do {
++		umul_ppmm(prod_high, prod_low, s1_ptr[j], s2_limb);
++
++		prod_low += cy_limb;
++		cy_limb = (prod_low < cy_limb ? 1 : 0) + prod_high;
++
++		x = res_ptr[j];
++		prod_low = x + prod_low;
++		cy_limb += prod_low < x ? 1 : 0;
++		res_ptr[j] = prod_low;
++	} while (++j);
++	return cy_limb;
++}
++
++mpi_limb_t
++mpihelp_mul_1(mpi_ptr_t res_ptr, mpi_ptr_t s1_ptr, mpi_size_t s1_size,
++	      mpi_limb_t s2_limb)
++{
++	mpi_limb_t cy_limb;
++	mpi_size_t j;
++	mpi_limb_t prod_high, prod_low;
++
++	/* The loop counter and index J goes from -S1_SIZE to -1.  This way
++	 * the loop becomes faster.  */
++	j = -s1_size;
++
++	/* Offset the base pointers to compensate for the negative indices.  */
++	s1_ptr -= j;
++	res_ptr -= j;
++
++	cy_limb = 0;
++	do {
++		umul_ppmm(prod_high, prod_low, s1_ptr[j], s2_limb);
++		prod_low += cy_limb;
++		cy_limb = (prod_low < cy_limb ? 1 : 0) + prod_high;
++		res_ptr[j] = prod_low;
++	} while (++j);
++
++	return cy_limb;
++}
++
++
++/* Divide num (NP/NSIZE) by den (DP/DSIZE) and write
++ * the NSIZE-DSIZE least significant quotient limbs at QP
++ * and the DSIZE long remainder at NP.	If QEXTRA_LIMBS is
++ * non-zero, generate that many fraction bits and append them after the
++ * other quotient limbs.
++ * Return the most significant limb of the quotient, this is always 0 or 1.
++ *
++ * Preconditions:
++ * 0. NSIZE >= DSIZE.
++ * 1. The most significant bit of the divisor must be set.
++ * 2. QP must either not overlap with the input operands at all, or
++ *    QP + DSIZE >= NP must hold true.	(This means that it's
++ *    possible to put the quotient in the high part of NUM, right after the
++ *    remainder in NUM.
++ * 3. NSIZE >= DSIZE, even if QEXTRA_LIMBS is non-zero.
++ */
++
++mpi_limb_t
++mpihelp_divrem(mpi_ptr_t qp, mpi_size_t qextra_limbs,
++	       mpi_ptr_t np, mpi_size_t nsize, mpi_ptr_t dp, mpi_size_t dsize)
++{
++	mpi_limb_t most_significant_q_limb = 0;
++
++	switch (dsize) {
++	case 0:
++		/* We are asked to divide by zero, so go ahead and do it!  (To make
++		   the compiler not remove this statement, return the value.)  */
++		/*
++		 * existing clients of this function have been modified
++		 * not to call it with dsize == 0, so this should not happen
++		 */
++		return 1 / dsize;
++
++	case 1:
++		{
++			mpi_size_t i;
++			mpi_limb_t n1;
++			mpi_limb_t d;
++
++			d = dp[0];
++			n1 = np[nsize - 1];
++
++			if (n1 >= d) {
++				n1 -= d;
++				most_significant_q_limb = 1;
++			}
++
++			qp += qextra_limbs;
++			for (i = nsize - 2; i >= 0; i--)
++				udiv_qrnnd(qp[i], n1, n1, np[i], d);
++			qp -= qextra_limbs;
++
++			for (i = qextra_limbs - 1; i >= 0; i--)
++				udiv_qrnnd(qp[i], n1, n1, 0, d);
++
++			np[0] = n1;
++		}
++		break;
++
++	case 2:
++		{
++			mpi_size_t i;
++			mpi_limb_t n1, n0, n2;
++			mpi_limb_t d1, d0;
++
++			np += nsize - 2;
++			d1 = dp[1];
++			d0 = dp[0];
++			n1 = np[1];
++			n0 = np[0];
++
++			if (n1 >= d1 && (n1 > d1 || n0 >= d0)) {
++				sub_ddmmss(n1, n0, n1, n0, d1, d0);
++				most_significant_q_limb = 1;
++			}
++
++			for (i = qextra_limbs + nsize - 2 - 1; i >= 0; i--) {
++				mpi_limb_t q;
++				mpi_limb_t r;
++
++				if (i >= qextra_limbs)
++					np--;
++				else
++					np[0] = 0;
++
++				if (n1 == d1) {
++					/* Q should be either 111..111 or 111..110.  Need special
++					 * treatment of this rare case as normal division would
++					 * give overflow.  */
++					q = ~(mpi_limb_t) 0;
++
++					r = n0 + d1;
++					if (r < d1) {	/* Carry in the addition? */
++						add_ssaaaa(n1, n0, r - d0,
++							   np[0], 0, d0);
++						qp[i] = q;
++						continue;
++					}
++					n1 = d0 - (d0 != 0 ? 1 : 0);
++					n0 = -d0;
++				} else {
++					udiv_qrnnd(q, r, n1, n0, d1);
++					umul_ppmm(n1, n0, d0, q);
++				}
++
++				n2 = np[0];
++q_test:
++				if (n1 > r || (n1 == r && n0 > n2)) {
++					/* The estimated Q was too large.  */
++					q--;
++					sub_ddmmss(n1, n0, n1, n0, 0, d0);
++					r += d1;
++					if (r >= d1)	/* If not carry, test Q again.  */
++						goto q_test;
++				}
++
++				qp[i] = q;
++				sub_ddmmss(n1, n0, r, n2, n1, n0);
++			}
++			np[1] = n1;
++			np[0] = n0;
++		}
++		break;
++
++	default:
++		{
++			mpi_size_t i;
++			mpi_limb_t dX, d1, n0;
++
++			np += nsize - dsize;
++			dX = dp[dsize - 1];
++			d1 = dp[dsize - 2];
++			n0 = np[dsize - 1];
++
++			if (n0 >= dX) {
++				if (n0 > dX
++				    || mpihelp_cmp(np, dp, dsize - 1) >= 0) {
++					mpihelp_sub_n(np, np, dp, dsize);
++					n0 = np[dsize - 1];
++					most_significant_q_limb = 1;
++				}
++			}
++
++			for (i = qextra_limbs + nsize - dsize - 1; i >= 0; i--) {
++				mpi_limb_t q;
++				mpi_limb_t n1, n2;
++				mpi_limb_t cy_limb;
++
++				if (i >= qextra_limbs) {
++					np--;
++					n2 = np[dsize];
++				} else {
++					n2 = np[dsize - 1];
++					MPN_COPY_DECR(np + 1, np, dsize - 1);
++					np[0] = 0;
++				}
++
++				if (n0 == dX) {
++					/* This might over-estimate q, but it's probably not worth
++					 * the extra code here to find out.  */
++					q = ~(mpi_limb_t) 0;
++				} else {
++					mpi_limb_t r;
++
++					udiv_qrnnd(q, r, n0, np[dsize - 1], dX);
++					umul_ppmm(n1, n0, d1, q);
++
++					while (n1 > r
++					       || (n1 == r
++						   && n0 > np[dsize - 2])) {
++						q--;
++						r += dX;
++						if (r < dX)	/* I.e. "carry in previous addition?" */
++							break;
++						n1 -= n0 < d1;
++						n0 -= d1;
++					}
++				}
++
++				/* Possible optimization: We already have (q * n0) and (1 * n1)
++				 * after the calculation of q.  Taking advantage of that, we
++				 * could make this loop make two iterations less.  */
++				cy_limb = mpihelp_submul_1(np, dp, dsize, q);
++
++				if (n2 != cy_limb) {
++					mpihelp_add_n(np, np, dp, dsize);
++					q--;
++				}
++
++				qp[i] = q;
++				n0 = np[dsize - 1];
++			}
++		}
++	}
++
++	return most_significant_q_limb;
++}
++
++#define KARATSUBA_THRESHOLD 16
++
++void mpih_sqr_n_basecase(mpi_ptr_t prodp, mpi_ptr_t up, mpi_size_t size);
++void mpih_sqr_n(mpi_ptr_t prodp, mpi_ptr_t up, mpi_size_t size,
++		mpi_ptr_t tspace);
++
++mpi_limb_t mul_n_basecase(mpi_ptr_t prodp, mpi_ptr_t up, mpi_ptr_t vp, mpi_size_t size);
++void mul_n(mpi_ptr_t prodp, mpi_ptr_t up, mpi_ptr_t vp, mpi_size_t size, mpi_ptr_t tspace);
++int mpihelp_mul(mpi_ptr_t prodp, mpi_ptr_t up, mpi_size_t usize, mpi_ptr_t vp, mpi_size_t vsize, mpi_limb_t *_result);
++
++static inline mpi_limb_t
++mpihelp_add_1(mpi_ptr_t res_ptr, mpi_ptr_t s1_ptr,
++	      mpi_size_t s1_size, mpi_limb_t s2_limb)
++{
++	mpi_limb_t x;
++
++	x = *s1_ptr++;
++	s2_limb += x;
++	*res_ptr++ = s2_limb;
++	if (s2_limb < x) {	/* sum is less than the left operand: handle carry */
++		while (--s1_size) {
++			x = *s1_ptr++ + 1;	/* add carry */
++			*res_ptr++ = x;	/* and store */
++			if (x)	/* not 0 (no overflow): we can stop */
++				goto leave;
++		}
++		return 1;	/* return carry (size of s1 to small) */
++	}
++
++leave:
++	if (res_ptr != s1_ptr) {	/* not the same variable */
++		mpi_size_t i;	/* copy the rest */
++		for (i = 0; i < s1_size - 1; i++)
++			res_ptr[i] = s1_ptr[i];
++	}
++	return 0;		/* no carry */
++}
++
++#define MPN_SQR_N_RECURSE(prodp, up, size, tspace)		\
++	do {							\
++		if ((size) < KARATSUBA_THRESHOLD)		\
++			mpih_sqr_n_basecase(prodp, up, size);	\
++		else						\
++			mpih_sqr_n(prodp, up, size, tspace);	\
++	} while (0);
++
++#define MPN_MUL_N_RECURSE(prodp, up, vp, size, tspace)		\
++	do {							\
++		if ((size) < KARATSUBA_THRESHOLD)		\
++			mul_n_basecase(prodp, up, vp, size);	\
++		else						\
++			mul_n(prodp, up, vp, size, tspace);	\
++	} while (0);
++
++int
++mpihelp_mul_karatsuba_case(mpi_ptr_t prodp,
++			   mpi_ptr_t up, mpi_size_t usize,
++			   mpi_ptr_t vp, mpi_size_t vsize,
++			   struct karatsuba_ctx *ctx)
++{
++	mpi_limb_t cy;
++
++	if (!ctx->tspace || ctx->tspace_size < vsize) {
++		if (ctx->tspace)
++			mpi_free_limb_space(ctx->tspace);
++		ctx->tspace = mpi_alloc_limb_space(2 * vsize);
++		if (!ctx->tspace)
++			return -ENOMEM;
++		ctx->tspace_size = vsize;
++	}
++
++	MPN_MUL_N_RECURSE(prodp, up, vp, vsize, ctx->tspace);
++
++	prodp += vsize;
++	up += vsize;
++	usize -= vsize;
++	if (usize >= vsize) {
++		if (!ctx->tp || ctx->tp_size < vsize) {
++			if (ctx->tp)
++				mpi_free_limb_space(ctx->tp);
++			ctx->tp = mpi_alloc_limb_space(2 * vsize);
++			if (!ctx->tp) {
++				if (ctx->tspace)
++					mpi_free_limb_space(ctx->tspace);
++				ctx->tspace = NULL;
++				return -ENOMEM;
++			}
++			ctx->tp_size = vsize;
++		}
++
++		do {
++			MPN_MUL_N_RECURSE(ctx->tp, up, vp, vsize, ctx->tspace);
++			cy = mpihelp_add_n(prodp, prodp, ctx->tp, vsize);
++			mpihelp_add_1(prodp + vsize, ctx->tp + vsize, vsize,
++				      cy);
++			prodp += vsize;
++			up += vsize;
++			usize -= vsize;
++		} while (usize >= vsize);
++	}
++
++	if (usize) {
++		if (usize < KARATSUBA_THRESHOLD) {
++			mpi_limb_t tmp;
++			if (mpihelp_mul(ctx->tspace, vp, vsize, up, usize, &tmp)
++			    < 0)
++				return -ENOMEM;
++		} else {
++			if (!ctx->next) {
++				ctx->next = kzalloc(sizeof *ctx);
++				if (!ctx->next)
++					return -ENOMEM;
++			}
++			if (mpihelp_mul_karatsuba_case(ctx->tspace,
++						       vp, vsize,
++						       up, usize,
++						       ctx->next) < 0)
++				return -ENOMEM;
++		}
++
++		cy = mpihelp_add_n(prodp, prodp, ctx->tspace, vsize);
++		mpihelp_add_1(prodp + vsize, ctx->tspace + vsize, usize, cy);
++	}
++
++	return 0;
++}
++
++void mpih_sqr_n_basecase(mpi_ptr_t prodp, mpi_ptr_t up, mpi_size_t size)
++{
++	mpi_size_t i;
++	mpi_limb_t cy_limb;
++	mpi_limb_t v_limb;
++
++	/* Multiply by the first limb in V separately, as the result can be
++	 * stored (not added) to PROD.  We also avoid a loop for zeroing.  */
++	v_limb = up[0];
++	if (v_limb <= 1) {
++		if (v_limb == 1)
++			MPN_COPY(prodp, up, size);
++		else
++			MPN_ZERO(prodp, size);
++		cy_limb = 0;
++	} else
++		cy_limb = mpihelp_mul_1(prodp, up, size, v_limb);
++
++	prodp[size] = cy_limb;
++	prodp++;
++
++	/* For each iteration in the outer loop, multiply one limb from
++	 * U with one limb from V, and add it to PROD.  */
++	for (i = 1; i < size; i++) {
++		v_limb = up[i];
++		if (v_limb <= 1) {
++			cy_limb = 0;
++			if (v_limb == 1)
++				cy_limb = mpihelp_add_n(prodp, prodp, up, size);
++		} else
++			cy_limb = mpihelp_addmul_1(prodp, up, size, v_limb);
++
++		prodp[size] = cy_limb;
++		prodp++;
++	}
++}
++
++mpi_limb_t
++mul_n_basecase(mpi_ptr_t prodp, mpi_ptr_t up, mpi_ptr_t vp, mpi_size_t size)
++{
++	mpi_size_t i;
++	mpi_limb_t cy;
++	mpi_limb_t v_limb;
++
++	/* Multiply by the first limb in V separately, as the result can be
++	 * stored (not added) to PROD.  We also avoid a loop for zeroing.  */
++	v_limb = vp[0];
++	if (v_limb <= 1) {
++		if (v_limb == 1)
++			MPN_COPY(prodp, up, size);
++		else
++			MPN_ZERO(prodp, size);
++		cy = 0;
++	} else
++		cy = mpihelp_mul_1(prodp, up, size, v_limb);
++
++	prodp[size] = cy;
++	prodp++;
++
++	/* For each iteration in the outer loop, multiply one limb from
++	 * U with one limb from V, and add it to PROD.  */
++	for (i = 1; i < size; i++) {
++		v_limb = vp[i];
++		if (v_limb <= 1) {
++			cy = 0;
++			if (v_limb == 1)
++				cy = mpihelp_add_n(prodp, prodp, up, size);
++		} else
++			cy = mpihelp_addmul_1(prodp, up, size, v_limb);
++
++		prodp[size] = cy;
++		prodp++;
++	}
++
++	return cy;
++}
++
++void
++mul_n(mpi_ptr_t prodp, mpi_ptr_t up, mpi_ptr_t vp,
++		mpi_size_t size, mpi_ptr_t tspace)
++{
++	if (size & 1) {
++		/* The size is odd, and the code below doesn't handle that.
++		 * Multiply the least significant (size - 1) limbs with a recursive
++		 * call, and handle the most significant limb of S1 and S2
++		 * separately.
++		 * A slightly faster way to do this would be to make the Karatsuba
++		 * code below behave as if the size were even, and let it check for
++		 * odd size in the end.  I.e., in essence move this code to the end.
++		 * Doing so would save us a recursive call, and potentially make the
++		 * stack grow a lot less.
++		 */
++		mpi_size_t esize = size - 1;	/* even size */
++		mpi_limb_t cy_limb;
++
++		MPN_MUL_N_RECURSE(prodp, up, vp, esize, tspace);
++		cy_limb = mpihelp_addmul_1(prodp + esize, up, esize, vp[esize]);
++		prodp[esize + esize] = cy_limb;
++		cy_limb = mpihelp_addmul_1(prodp + esize, vp, size, up[esize]);
++		prodp[esize + size] = cy_limb;
++	} else {
++		/* Anatolij Alekseevich Karatsuba's divide-and-conquer algorithm.
++		 *
++		 * Split U in two pieces, U1 and U0, such that
++		 * U = U0 + U1*(B**n),
++		 * and V in V1 and V0, such that
++		 * V = V0 + V1*(B**n).
++		 *
++		 * UV is then computed recursively using the identity
++		 *
++		 *        2n   n          n                     n
++		 * UV = (B  + B )U V  +  B (U -U )(V -V )  +  (B + 1)U V
++		 *                1 1        1  0   0  1              0 0
++		 *
++		 * Where B = 2**BITS_PER_MP_LIMB.
++		 */
++		mpi_size_t hsize = size >> 1;
++		mpi_limb_t cy;
++		int negflg;
++
++		/* Product H.      ________________  ________________
++		 *                |_____U1 x V1____||____U0 x V0_____|
++		 * Put result in upper part of PROD and pass low part of TSPACE
++		 * as new TSPACE.
++		 */
++		MPN_MUL_N_RECURSE(prodp + size, up + hsize, vp + hsize, hsize,
++				  tspace);
++
++		/* Product M.      ________________
++		 *                |_(U1-U0)(V0-V1)_|
++		 */
++		if (mpihelp_cmp(up + hsize, up, hsize) >= 0) {
++			mpihelp_sub_n(prodp, up + hsize, up, hsize);
++			negflg = 0;
++		} else {
++			mpihelp_sub_n(prodp, up, up + hsize, hsize);
++			negflg = 1;
++		}
++		if (mpihelp_cmp(vp + hsize, vp, hsize) >= 0) {
++			mpihelp_sub_n(prodp + hsize, vp + hsize, vp, hsize);
++			negflg ^= 1;
++		} else {
++			mpihelp_sub_n(prodp + hsize, vp, vp + hsize, hsize);
++			/* No change of NEGFLG.  */
++		}
++		/* Read temporary operands from low part of PROD.
++		 * Put result in low part of TSPACE using upper part of TSPACE
++		 * as new TSPACE.
++		 */
++		MPN_MUL_N_RECURSE(tspace, prodp, prodp + hsize, hsize,
++				  tspace + size);
++
++		/* Add/copy product H. */
++		MPN_COPY(prodp + hsize, prodp + size, hsize);
++		cy = mpihelp_add_n(prodp + size, prodp + size,
++				   prodp + size + hsize, hsize);
++
++		/* Add product M (if NEGFLG M is a negative number) */
++		if (negflg)
++			cy -=
++			    mpihelp_sub_n(prodp + hsize, prodp + hsize, tspace,
++					  size);
++		else
++			cy +=
++			    mpihelp_add_n(prodp + hsize, prodp + hsize, tspace,
++					  size);
++
++		/* Product L.      ________________  ________________
++		 *                |________________||____U0 x V0_____|
++		 * Read temporary operands from low part of PROD.
++		 * Put result in low part of TSPACE using upper part of TSPACE
++		 * as new TSPACE.
++		 */
++		MPN_MUL_N_RECURSE(tspace, up, vp, hsize, tspace + size);
++
++		/* Add/copy Product L (twice) */
++
++		cy += mpihelp_add_n(prodp + hsize, prodp + hsize, tspace, size);
++		if (cy)
++			mpihelp_add_1(prodp + hsize + size,
++				      prodp + hsize + size, hsize, cy);
++
++		MPN_COPY(prodp, tspace, hsize);
++		cy = mpihelp_add_n(prodp + hsize, prodp + hsize, tspace + hsize,
++				   hsize);
++		if (cy)
++			mpihelp_add_1(prodp + size, prodp + size, size, 1);
++	}
++}
++
++void
++mpih_sqr_n(mpi_ptr_t prodp, mpi_ptr_t up, mpi_size_t size, mpi_ptr_t tspace)
++{
++	if (size & 1) {
++		/* The size is odd, and the code below doesn't handle that.
++		 * Multiply the least significant (size - 1) limbs with a recursive
++		 * call, and handle the most significant limb of S1 and S2
++		 * separately.
++		 * A slightly faster way to do this would be to make the Karatsuba
++		 * code below behave as if the size were even, and let it check for
++		 * odd size in the end.  I.e., in essence move this code to the end.
++		 * Doing so would save us a recursive call, and potentially make the
++		 * stack grow a lot less.
++		 */
++		mpi_size_t esize = size - 1;	/* even size */
++		mpi_limb_t cy_limb;
++
++		MPN_SQR_N_RECURSE(prodp, up, esize, tspace);
++		cy_limb = mpihelp_addmul_1(prodp + esize, up, esize, up[esize]);
++		prodp[esize + esize] = cy_limb;
++		cy_limb = mpihelp_addmul_1(prodp + esize, up, size, up[esize]);
++
++		prodp[esize + size] = cy_limb;
++	} else {
++		mpi_size_t hsize = size >> 1;
++		mpi_limb_t cy;
++
++		/* Product H.      ________________  ________________
++		 *                |_____U1 x U1____||____U0 x U0_____|
++		 * Put result in upper part of PROD and pass low part of TSPACE
++		 * as new TSPACE.
++		 */
++		MPN_SQR_N_RECURSE(prodp + size, up + hsize, hsize, tspace);
++
++		/* Product M.      ________________
++		 *                |_(U1-U0)(U0-U1)_|
++		 */
++		if (mpihelp_cmp(up + hsize, up, hsize) >= 0)
++			mpihelp_sub_n(prodp, up + hsize, up, hsize);
++		else
++			mpihelp_sub_n(prodp, up, up + hsize, hsize);
++
++		/* Read temporary operands from low part of PROD.
++		 * Put result in low part of TSPACE using upper part of TSPACE
++		 * as new TSPACE.  */
++		MPN_SQR_N_RECURSE(tspace, prodp, hsize, tspace + size);
++
++		/* Add/copy product H  */
++		MPN_COPY(prodp + hsize, prodp + size, hsize);
++		cy = mpihelp_add_n(prodp + size, prodp + size,
++				   prodp + size + hsize, hsize);
++
++		/* Add product M (if NEGFLG M is a negative number).  */
++		cy -= mpihelp_sub_n(prodp + hsize, prodp + hsize, tspace, size);
++
++		/* Product L.      ________________  ________________
++		 *                |________________||____U0 x U0_____|
++		 * Read temporary operands from low part of PROD.
++		 * Put result in low part of TSPACE using upper part of TSPACE
++		 * as new TSPACE.  */
++		MPN_SQR_N_RECURSE(tspace, up, hsize, tspace + size);
++
++		/* Add/copy Product L (twice).  */
++		cy += mpihelp_add_n(prodp + hsize, prodp + hsize, tspace, size);
++		if (cy)
++			mpihelp_add_1(prodp + hsize + size,
++				      prodp + hsize + size, hsize, cy);
++
++		MPN_COPY(prodp, tspace, hsize);
++		cy = mpihelp_add_n(prodp + hsize, prodp + hsize, tspace + hsize,
++				   hsize);
++		if (cy)
++			mpihelp_add_1(prodp + size, prodp + size, size, 1);
++	}
++}
++
++void mpihelp_mul_n(mpi_ptr_t prodp,
++		mpi_ptr_t up, mpi_ptr_t vp, mpi_size_t size)
++{
++	if (up == vp) {
++		if (size < KARATSUBA_THRESHOLD)
++			mpih_sqr_n_basecase(prodp, up, size);
++		else {
++			mpi_ptr_t tspace;
++			tspace = mpi_alloc_limb_space(2 * size);
++			mpih_sqr_n(prodp, up, size, tspace);
++			mpi_free_limb_space(tspace);
++		}
++	} else {
++		if (size < KARATSUBA_THRESHOLD)
++			mul_n_basecase(prodp, up, vp, size);
++		else {
++			mpi_ptr_t tspace;
++			tspace = mpi_alloc_limb_space(2 * size);
++			mul_n(prodp, up, vp, size, tspace);
++			mpi_free_limb_space(tspace);
++		}
++	}
++}
++
++void mpihelp_release_karatsuba_ctx(struct karatsuba_ctx *ctx)
++{
++	struct karatsuba_ctx *ctx2;
++
++	if (ctx->tp)
++		mpi_free_limb_space(ctx->tp);
++	if (ctx->tspace)
++		mpi_free_limb_space(ctx->tspace);
++	for (ctx = ctx->next; ctx; ctx = ctx2) {
++		ctx2 = ctx->next;
++		if (ctx->tp)
++			mpi_free_limb_space(ctx->tp);
++		if (ctx->tspace)
++			mpi_free_limb_space(ctx->tspace);
++		free(ctx);
++	}
++}
++
++void mpi_assign_limb_space(MPI a, mpi_ptr_t ap, unsigned nlimbs)
++{
++	mpi_free_limb_space(a->d);
++	a->d = ap;
++	a->alloced = nlimbs;
++}
++
++int
++mpihelp_mul(mpi_ptr_t prodp, mpi_ptr_t up, mpi_size_t usize,
++	    mpi_ptr_t vp, mpi_size_t vsize, mpi_limb_t *_result)
++{
++	mpi_ptr_t prod_endp = prodp + usize + vsize - 1;
++	mpi_limb_t cy;
++	struct karatsuba_ctx ctx;
++
++	if (vsize < KARATSUBA_THRESHOLD) {
++		mpi_size_t i;
++		mpi_limb_t v_limb;
++
++		if (!vsize) {
++			*_result = 0;
++			return 0;
++		}
++
++		/* Multiply by the first limb in V separately, as the result can be
++		 * stored (not added) to PROD.  We also avoid a loop for zeroing.  */
++		v_limb = vp[0];
++		if (v_limb <= 1) {
++			if (v_limb == 1)
++				MPN_COPY(prodp, up, usize);
++			else
++				MPN_ZERO(prodp, usize);
++			cy = 0;
++		} else
++			cy = mpihelp_mul_1(prodp, up, usize, v_limb);
++
++		prodp[usize] = cy;
++		prodp++;
++
++		/* For each iteration in the outer loop, multiply one limb from
++		 * U with one limb from V, and add it to PROD.  */
++		for (i = 1; i < vsize; i++) {
++			v_limb = vp[i];
++			if (v_limb <= 1) {
++				cy = 0;
++				if (v_limb == 1)
++					cy = mpihelp_add_n(prodp, prodp, up,
++							   usize);
++			} else
++				cy = mpihelp_addmul_1(prodp, up, usize, v_limb);
++
++			prodp[usize] = cy;
++			prodp++;
++		}
++
++		*_result = cy;
++		return 0;
++	}
++
++	memset(&ctx, 0, sizeof ctx);
++	if (mpihelp_mul_karatsuba_case(prodp, up, usize, vp, vsize, &ctx) < 0)
++		return -ENOMEM;
++	mpihelp_release_karatsuba_ctx(&ctx);
++	*_result = *prod_endp;
++	return 0;
++}
++
++static inline mpi_limb_t
++mpihelp_sub_1(mpi_ptr_t res_ptr, mpi_ptr_t s1_ptr,
++	      mpi_size_t s1_size, mpi_limb_t s2_limb)
++{
++	mpi_limb_t x;
++
++	x = *s1_ptr++;
++	s2_limb = x - s2_limb;
++	*res_ptr++ = s2_limb;
++	if (s2_limb > x) {
++		while (--s1_size) {
++			x = *s1_ptr++;
++			*res_ptr++ = x - 1;
++			if (x)
++				goto leave;
++		}
++		return 1;
++	}
++
++leave:
++	if (res_ptr != s1_ptr) {
++		mpi_size_t i;
++		for (i = 0; i < s1_size - 1; i++)
++			res_ptr[i] = s1_ptr[i];
++	}
++	return 0;
++}
++
++static inline mpi_limb_t
++mpihelp_sub(mpi_ptr_t res_ptr, mpi_ptr_t s1_ptr, mpi_size_t s1_size,
++	    mpi_ptr_t s2_ptr, mpi_size_t s2_size)
++{
++	mpi_limb_t cy = 0;
++
++	if (s2_size)
++		cy = mpihelp_sub_n(res_ptr, s1_ptr, s2_ptr, s2_size);
++
++	if (s1_size - s2_size)
++		cy = mpihelp_sub_1(res_ptr + s2_size, s1_ptr + s2_size,
++				   s1_size - s2_size, cy);
++	return cy;
++}
++
++/****************
++ * RES = BASE ^ EXP mod MOD
++ */
++int mpi_powm(MPI res, MPI base, MPI exp, MPI mod)
++{
++	mpi_ptr_t mp_marker = NULL, bp_marker = NULL, ep_marker = NULL;
++	struct karatsuba_ctx karactx = {};
++	mpi_ptr_t xp_marker = NULL;
++	mpi_ptr_t tspace = NULL;
++	mpi_ptr_t rp, ep, mp, bp;
++	mpi_size_t esize, msize, bsize, rsize;
++	int msign, bsign, rsign;
++	mpi_size_t size;
++	int mod_shift_cnt;
++	int negative_result;
++	int assign_rp = 0;
++	mpi_size_t tsize = 0;	/* to avoid compiler warning */
++	/* fixme: we should check that the warning is void */
++	int rc = -ENOMEM;
++
++	esize = exp->nlimbs;
++	msize = mod->nlimbs;
++	size = 2 * msize;
++	msign = mod->sign;
++
++	rp = res->d;
++	ep = exp->d;
++
++	if (!msize)
++		return -EINVAL;
++
++	if (!esize) {
++		/* Exponent is zero, result is 1 mod MOD, i.e., 1 or 0
++		 * depending on if MOD equals 1.  */
++		res->nlimbs = (msize == 1 && mod->d[0] == 1) ? 0 : 1;
++		if (res->nlimbs) {
++			if (mpi_resize(res, 1) < 0)
++				goto enomem;
++			rp = res->d;
++			rp[0] = 1;
++		}
++		res->sign = 0;
++		goto leave;
++	}
++
++	/* Normalize MOD (i.e. make its most significant bit set) as required by
++	 * mpn_divrem.  This will make the intermediate values in the calculation
++	 * slightly larger, but the correct result is obtained after a final
++	 * reduction using the original MOD value.  */
++	mp = mp_marker = mpi_alloc_limb_space(msize);
++	if (!mp)
++		goto enomem;
++	mod_shift_cnt = count_leading_zeros(mod->d[msize - 1]);
++	if (mod_shift_cnt)
++		mpihelp_lshift(mp, mod->d, msize, mod_shift_cnt);
++	else
++		MPN_COPY(mp, mod->d, msize);
++
++	bsize = base->nlimbs;
++	bsign = base->sign;
++	if (bsize > msize) {	/* The base is larger than the module. Reduce it. */
++		/* Allocate (BSIZE + 1) with space for remainder and quotient.
++		 * (The quotient is (bsize - msize + 1) limbs.)  */
++		bp = bp_marker = mpi_alloc_limb_space(bsize + 1);
++		if (!bp)
++			goto enomem;
++		MPN_COPY(bp, base->d, bsize);
++		/* We don't care about the quotient, store it above the remainder,
++		 * at BP + MSIZE.  */
++		mpihelp_divrem(bp + msize, 0, bp, bsize, mp, msize);
++		bsize = msize;
++		/* Canonicalize the base, since we are going to multiply with it
++		 * quite a few times.  */
++		MPN_NORMALIZE(bp, bsize);
++	} else
++		bp = base->d;
++
++	if (!bsize) {
++		res->nlimbs = 0;
++		res->sign = 0;
++		goto leave;
++	}
++
++	if (res->alloced < size) {
++		/* We have to allocate more space for RES.  If any of the input
++		 * parameters are identical to RES, defer deallocation of the old
++		 * space.  */
++		if (rp == ep || rp == mp || rp == bp) {
++			rp = mpi_alloc_limb_space(size);
++			if (!rp)
++				goto enomem;
++			assign_rp = 1;
++		} else {
++			if (mpi_resize(res, size) < 0)
++				goto enomem;
++			rp = res->d;
++		}
++	} else {		/* Make BASE, EXP and MOD not overlap with RES.  */
++		if (rp == bp) {
++			/* RES and BASE are identical.  Allocate temp. space for BASE.  */
++			bp = bp_marker = mpi_alloc_limb_space(bsize);
++			if (!bp)
++				goto enomem;
++			MPN_COPY(bp, rp, bsize);
++		}
++		if (rp == ep) {
++			/* RES and EXP are identical.  Allocate temp. space for EXP.  */
++			ep = ep_marker = mpi_alloc_limb_space(esize);
++			if (!ep)
++				goto enomem;
++			MPN_COPY(ep, rp, esize);
++		}
++		if (rp == mp) {
++			/* RES and MOD are identical.  Allocate temporary space for MOD. */
++			mp = mp_marker = mpi_alloc_limb_space(msize);
++			if (!mp)
++				goto enomem;
++			MPN_COPY(mp, rp, msize);
++		}
++	}
++
++	MPN_COPY(rp, bp, bsize);
++	rsize = bsize;
++	rsign = bsign;
++
++	{
++		mpi_size_t i;
++		mpi_ptr_t xp;
++		int c;
++		mpi_limb_t e;
++		mpi_limb_t carry_limb;
++
++		xp = xp_marker = mpi_alloc_limb_space(2 * (msize + 1));
++		if (!xp)
++			goto enomem;
++
++		negative_result = (ep[0] & 1) && base->sign;
++
++		i = esize - 1;
++		e = ep[i];
++		c = count_leading_zeros(e);
++		e = (e << c) << 1;	/* shift the exp bits to the left, lose msb */
++		c = BITS_PER_MPI_LIMB - 1 - c;
++
++		/* Main loop.
++		 *
++		 * Make the result be pointed to alternately by XP and RP.  This
++		 * helps us avoid block copying, which would otherwise be necessary
++		 * with the overlap restrictions of mpihelp_divmod. With 50% probability
++		 * the result after this loop will be in the area originally pointed
++		 * by RP (==RES->d), and with 50% probability in the area originally
++		 * pointed to by XP.
++		 */
++
++		for (;;) {
++			while (c) {
++				mpi_ptr_t tp;
++				mpi_size_t xsize;
++
++				/*if (mpihelp_mul_n(xp, rp, rp, rsize) < 0) goto enomem */
++				if (rsize < KARATSUBA_THRESHOLD)
++					mpih_sqr_n_basecase(xp, rp, rsize);
++				else {
++					if (!tspace) {
++						tsize = 2 * rsize;
++						tspace =
++						    mpi_alloc_limb_space(tsize);
++						if (!tspace)
++							goto enomem;
++					} else if (tsize < (2 * rsize)) {
++						mpi_free_limb_space(tspace);
++						tsize = 2 * rsize;
++						tspace =
++						    mpi_alloc_limb_space(tsize);
++						if (!tspace)
++							goto enomem;
++					}
++					mpih_sqr_n(xp, rp, rsize, tspace);
++				}
++
++				xsize = 2 * rsize;
++				if (xsize > msize) {
++					mpihelp_divrem(xp + msize, 0, xp, xsize,
++						       mp, msize);
++					xsize = msize;
++				}
++
++				tp = rp;
++				rp = xp;
++				xp = tp;
++				rsize = xsize;
++
++				if ((mpi_limb_signed_t) e < 0) {
++					/*mpihelp_mul( xp, rp, rsize, bp, bsize ); */
++					if (bsize < KARATSUBA_THRESHOLD) {
++						mpi_limb_t tmp;
++						if (mpihelp_mul
++						    (xp, rp, rsize, bp, bsize,
++						     &tmp) < 0)
++							goto enomem;
++					} else {
++						if (mpihelp_mul_karatsuba_case
++						    (xp, rp, rsize, bp, bsize,
++						     &karactx) < 0)
++							goto enomem;
++					}
++
++					xsize = rsize + bsize;
++					if (xsize > msize) {
++						mpihelp_divrem(xp + msize, 0,
++							       xp, xsize, mp,
++							       msize);
++						xsize = msize;
++					}
++
++					tp = rp;
++					rp = xp;
++					xp = tp;
++					rsize = xsize;
++				}
++				e <<= 1;
++				c--;
++			}
++
++			i--;
++			if (i < 0)
++				break;
++			e = ep[i];
++			c = BITS_PER_MPI_LIMB;
++		}
++
++		/* We shifted MOD, the modulo reduction argument, left MOD_SHIFT_CNT
++		 * steps.  Adjust the result by reducing it with the original MOD.
++		 *
++		 * Also make sure the result is put in RES->d (where it already
++		 * might be, see above).
++		 */
++		if (mod_shift_cnt) {
++			carry_limb =
++			    mpihelp_lshift(res->d, rp, rsize, mod_shift_cnt);
++			rp = res->d;
++			if (carry_limb) {
++				rp[rsize] = carry_limb;
++				rsize++;
++			}
++		} else {
++			MPN_COPY(res->d, rp, rsize);
++			rp = res->d;
++		}
++
++		if (rsize >= msize) {
++			mpihelp_divrem(rp + msize, 0, rp, rsize, mp, msize);
++			rsize = msize;
++		}
++
++		/* Remove any leading zero words from the result.  */
++		if (mod_shift_cnt)
++			mpihelp_rshift(rp, rp, rsize, mod_shift_cnt);
++		MPN_NORMALIZE(rp, rsize);
++	}
++
++	if (negative_result && rsize) {
++		if (mod_shift_cnt)
++			mpihelp_rshift(mp, mp, msize, mod_shift_cnt);
++		mpihelp_sub(rp, mp, msize, rp, rsize);
++		rsize = msize;
++		rsign = msign;
++		MPN_NORMALIZE(rp, rsize);
++	}
++	res->nlimbs = rsize;
++	res->sign = rsign;
++
++leave:
++	rc = 0;
++enomem:
++	mpihelp_release_karatsuba_ctx(&karactx);
++	if (assign_rp)
++		mpi_assign_limb_space(res, rp, size);
++	if (mp_marker)
++		mpi_free_limb_space(mp_marker);
++	if (bp_marker)
++		mpi_free_limb_space(bp_marker);
++	if (ep_marker)
++		mpi_free_limb_space(ep_marker);
++	if (xp_marker)
++		mpi_free_limb_space(xp_marker);
++	if (tspace)
++		mpi_free_limb_space(tspace);
++	return rc;
++}
++/*
++ * RSAEP function [RFC3447 sec 5.1.1] same as RSAVP1 
++ * c = m^e mod n;
++ */
++static int _rsa_enc(const struct rsa_mpi_key *key, MPI c, MPI m)
++{
++	/* (1) Validate 0 <= m < n */
++	if (mpi_cmp_ui(m, 0) < 0 || mpi_cmp(m, key->n) >= 0)
++		return -EINVAL;
++
++	/* (2) c = m^e mod n */
++	return mpi_powm(c, m, key->e, key->n);
++}
++
++/****************
++ * Note:  It was a bad idea to use the number of limbs to allocate
++ *	  because on a alpha the limbs are large but we normally need
++ *	  integers of n bits - So we should change this to bits (or bytes).
++ *
++ *	  But mpi_alloc is used in a lot of places :-)
++ */
++MPI mpi_alloc(unsigned nlimbs)
++{
++	MPI a;
++
++	a = malloc(sizeof *a);
++	if (!a)
++		return a;
++
++	if (nlimbs) {
++		a->d = mpi_alloc_limb_space(nlimbs);
++		if (!a->d) {
++			free(a);
++			return NULL;
++		}
++	} else {
++		a->d = NULL;
++	}
++
++	a->alloced = nlimbs;
++	a->nlimbs = 0;
++	a->sign = 0;
++	a->flags = 0;
++	a->nbits = 0;
++	return a;
++}
++
++void mpi_free(MPI a)
++{
++	if (!a)
++		return;
++
++	if (a->flags & 4)
++		free(a->d);
++	else
++		mpi_free_limb_space(a->d);
++
++	if (a->flags & ~7)
++		_dl_error_printf("invalid flag value in mpi\n");
++	free(a);
++}
++
++static inline unsigned int mpi_get_size(MPI a)
++{
++	return a->nlimbs * BYTES_PER_MPI_LIMB;
++}
++
++#define MAX_EXTERN_MPI_BITS 16384
++/**
++ * mpi_read_raw_data - Read a raw byte stream as a positive integer
++ * @xbuffer: The data to read
++ * @nbytes: The amount of data to read
++ */
++MPI mpi_read_raw_data(const void *xbuffer, size_t nbytes)
++{
++	const uint8_t *buffer = xbuffer;
++	int i, j;
++	unsigned nbits, nlimbs;
++	mpi_limb_t a;
++	MPI val = NULL;
++
++	while (nbytes > 0 && buffer[0] == 0) {
++		buffer++;
++		nbytes--;
++	}
++
++	nbits = nbytes * 8;
++	if (nbits > MAX_EXTERN_MPI_BITS) {
++		_dl_error_printf("MPI: mpi too large (%u bits)\n", nbits);
++		return NULL;
++	}
++	if (nbytes > 0)
++		nbits -= count_leading_zeros(buffer[0]) - (BITS_PER_LONG - 8);
++
++	nlimbs = DIV_ROUND_UP(nbytes, BYTES_PER_MPI_LIMB);
++	val = mpi_alloc(nlimbs);
++	if (!val)
++		return NULL;
++	val->nbits = nbits;
++	val->sign = 0;
++	val->nlimbs = nlimbs;
++
++	if (nbytes > 0) {
++		i = BYTES_PER_MPI_LIMB - nbytes % BYTES_PER_MPI_LIMB;
++		i %= BYTES_PER_MPI_LIMB;
++		for (j = nlimbs; j > 0; j--) {
++			a = 0;
++			for (; i < BYTES_PER_MPI_LIMB; i++) {
++				a <<= 8;
++				a |= *buffer++;
++			}
++			i = 0;
++			val->d[j - 1] = a;
++		}
++	}
++	return val;
++}
++
++int mpi_write_to_buffer(MPI a, void *xbuffer, unsigned nbytes, int *sign)
++{
++  be64 alimb;
++  u8 *p, *p2;
++  unsigned int n = mpi_get_size(a);
++  if (sign)
++		*sign = a->sign;
++
++  if (nbytes < n)
++		return -EOVERFLOW;
++
++  // pad with zero TODO 
++  p2 = xbuffer;
++
++  for (int i = a->nlimbs - 1; i >= 0; i--) {
++    alimb = a->d[i] ? cpu_to_be64(a->d[i]) : 0;
++    p = (u8 *)&alimb;
++
++    for (int x = 0; x < sizeof(alimb); x++) {
++      *p2++ = *p++;
++	}
++  } 
++
++  return 0;
++}
++
++/*
++ * mpi_read_raw_from_sgl() - Function allocates an MPI and populates it with
++ *			     data from the sgl
++ *
++ * This function works in the same way as the mpi_read_raw_data, but it
++ * takes an sgl instead of void * buffer. i.e. it allocates
++ * a new MPI and reads the content of the sgl to the MPI.
++ *
++ * @sgl:	scatterlist to read from
++ * @nbytes:	number of bytes to read
++ *
++ * Return:	Pointer to a new MPI or NULL on error
++ */
++MPI mpi_read_raw_from_buffer(const void *buffer, unsigned int nbytes)
++{
++  return mpi_read_raw_data(buffer, nbytes);
++}
++
++static int rsa_enc(struct rsa_mpi_key *pkey, void *src, int src_len, void *dst, int dst_len)
++{
++	MPI m, c = mpi_alloc(0);
++	int ret = 0;
++	int sign;
++
++	if (!c)
++		return -ENOMEM;
++
++	if (__glibc_unlikely(!pkey->n || !pkey->e)) {
++		ret = -EINVAL;
++		goto err_free_c;
++	}
++
++	ret = -ENOMEM;
++	m = mpi_read_raw_from_buffer(src, src_len);
++	if (!m) {
++		goto err_free_c;
++	}
++
++	ret = _rsa_enc(pkey, c, m);
++	if (ret) {
++		goto err_free_m;
++	}
++
++	ret = mpi_write_to_buffer(c, dst, dst_len, &sign);
++	if (ret) {
++		goto err_free_m;
++	}
++
++	if (sign < 0)
++		ret = -EBADMSG;
++
++err_free_m:
++	mpi_free(m);
++err_free_c:
++	mpi_free(c);
++	return ret;
++}
++
++/* RSA Algorithm Ended */
++
++
++static void rsa_free_mpi_key(struct rsa_mpi_key *key)
++{
++	mpi_free(key->d);
++	mpi_free(key->e);
++	mpi_free(key->n);
++	mpi_free(key->p);
++	mpi_free(key->q);
++	mpi_free(key->dp);
++	mpi_free(key->dq);
++	mpi_free(key->qinv);
++	key->d = NULL;
++	key->e = NULL;
++	key->n = NULL;
++	key->p = NULL;
++	key->q = NULL;
++	key->dp = NULL;
++	key->dq = NULL;
++	key->qinv = NULL;
++}
++
++/**
++ * rsa_key - RSA key structure
++ * @n           : RSA modulus raw byte stream
++ * @e           : RSA public exponent raw byte stream
++ * @d           : RSA private exponent raw byte stream
++ * @p           : RSA prime factor p of n raw byte stream
++ * @q           : RSA prime factor q of n raw byte stream
++ * @dp          : RSA exponent d mod (p - 1) raw byte stream
++ * @dq          : RSA exponent d mod (q - 1) raw byte stream
++ * @qinv        : RSA CRT coefficient q^(-1) mod p raw byte stream
++ * @n_sz        : length in bytes of RSA modulus n
++ * @e_sz        : length in bytes of RSA public exponent
++ * @d_sz        : length in bytes of RSA private exponent
++ * @p_sz        : length in bytes of p field
++ * @q_sz        : length in bytes of q field
++ * @dp_sz       : length in bytes of dp field
++ * @dq_sz       : length in bytes of dq field
++ * @qinv_sz     : length in bytes of qinv field
++ */
++struct rsa_key {
++	const u8 *n;
++	const u8 *e;
++	const u8 *d;
++	const u8 *p;
++	const u8 *q;
++	const u8 *dp;
++	const u8 *dq;
++	const u8 *qinv;
++	size_t n_sz;
++	size_t e_sz;
++	size_t d_sz;
++	size_t p_sz;
++	size_t q_sz;
++	size_t dp_sz;
++	size_t dq_sz;
++	size_t qinv_sz;
++};
++
++int rsa_get_n(void *context, size_t hdrlen, unsigned char tag,
++	      const void *value, size_t vlen)
++{
++	struct rsa_key *key = context;
++
++	/* invalid key provided */
++	if (!value || !vlen)
++		return -EINVAL;
++
++	key->n = value;
++	key->n_sz = vlen;
++
++	return 0;
++}
++
++int rsa_get_e(void *context, size_t hdrlen, unsigned char tag,
++	      const void *value, size_t vlen)
++{
++	struct rsa_key *key = context;
++
++	/* invalid key provided */
++	if (!value || !key->n_sz || !vlen || vlen > key->n_sz)
++		return -EINVAL;
++
++	key->e = value;
++	key->e_sz = vlen;
++
++	return 0;
++}
++
++enum rsapubkey_actions {
++	ACT_rsa_get_e = 0,
++	ACT_rsa_get_n = 1,
++	NR__rsapubkey_actions = 2
++};
++
++static asn1_action_t rsapubkey_action_table[NR__rsapubkey_actions] = {
++	[   0] = rsa_get_e,
++	[   1] = rsa_get_n,
++};
++
++static unsigned char rsapubkey_machine[] = {
++	// RsaPubKey
++	[   0] = ASN1_OP_MATCH,
++	[   1] = _tag(UNIV, CONS, SEQ),
++	[   2] =  ASN1_OP_MATCH_ACT,		// n
++	[   3] =  _tag(UNIV, PRIM, INT),
++	[   4] =  _action(ACT_rsa_get_n),
++	[   5] =  ASN1_OP_MATCH_ACT,		// e
++	[   6] =  _tag(UNIV, PRIM, INT),
++	[   7] =  _action(ACT_rsa_get_e),
++	[   8] = ASN1_OP_END_SEQ,
++	[   9] = ASN1_OP_COMPLETE,
++};
++
++static struct asn1_decoder rsapubkey_decoder = {
++	.machine = rsapubkey_machine,
++	.machlen = sizeof(rsapubkey_machine),
++	.actions = rsapubkey_action_table,
++};
++
++/**
++ * rsa_parse_pub_key() - decodes the BER encoded buffer and stores in the
++ *                       provided struct rsa_key, pointers to the raw key as is,
++ *                       so that the caller can copy it or MPI parse it, etc.
++ *
++ * @rsa_key:	struct rsa_key key representation
++ * @key:	key in BER format
++ * @key_len:	length of key
++ *
++ * Return:	0 on success or error code in case of error
++ */
++int rsa_parse_pub_key(struct rsa_key *rsa_key, const void *key,
++		      unsigned int key_len)
++{
++	return asn1_ber_decoder(&rsapubkey_decoder, rsa_key, key, key_len);
++}
++
++static struct rsa_mpi_key *rsa_set_pub_key(const void *key, unsigned int keylen)
++{
++	struct rsa_mpi_key *mpi_key = malloc(sizeof(struct rsa_mpi_key));
++	struct rsa_key raw_key = {0};
++	int ret;
++
++	/* Free the old MPI key if any */
++	rsa_free_mpi_key(mpi_key);
++
++	ret = rsa_parse_pub_key(&raw_key, key, keylen);
++	if (ret)
++		return NULL;
++
++	mpi_key->e = mpi_read_raw_data(raw_key.e, raw_key.e_sz);
++	if (!mpi_key->e)
++		goto err;
++
++	mpi_key->n = mpi_read_raw_data(raw_key.n, raw_key.n_sz);
++	if (!mpi_key->n)
++		goto err;
++
++	return mpi_key;
++
++err:
++	rsa_free_mpi_key(mpi_key);
++	return NULL;
++}
++
++static inline u8 *bin_pkey_pack_u32(u8 *dst, u32 val)
++{
++	memcpy(dst, &val, sizeof(val));
++	return dst + sizeof(val);
++}
++
++static int pkcs1pad_sha256_rsa_verify(void *digest, int digest_len, struct x509_certificate *cert, void *signed_digest, int signed_len)
++{
++  int ret = -EINVAL;
++  u8 *key = NULL, *ptr = NULL;
++  struct public_key *pkey = cert->pub;
++  
++  key = malloc(pkey->keylen + sizeof(u32) * 2 + pkey->paramlen);
++  memcpy(key, pkey->key, pkey->keylen);
++  ptr = key + pkey->keylen;
++  ptr = bin_pkey_pack_u32(ptr, pkey->algo);
++  ptr = bin_pkey_pack_u32(ptr, pkey->paramlen);
++  memcpy(ptr, pkey->params, pkey->paramlen);
++ 
++  struct rsa_mpi_key *mpi_key = rsa_set_pub_key(key, pkey->keylen);
++  if (!mpi_key) 
++    {
++  _dl_error_printf("Not able to set MPI key for RSA algorithm\n");
++  goto err_free;
++    }
++
++  /* FIX algorithm 256 bytes encryption length */
++  void *encrypted_digest = kzalloc(256);
++  ret = rsa_enc(mpi_key, signed_digest, signed_len, encrypted_digest, 256);
++  if (ret) 
++    {
++  _dl_error_printf("Encryt to calculte digest failed");
++  goto err_free;
++    }
++
++  ret = 0;
++  int *e_ptr = (int *)(encrypted_digest + 224);
++  int *d_ptr = (int *)digest;
++  for (int i = 0; i < 8; i ++)
++	if (e_ptr[i] != d_ptr[i]) 
++	  {
++	ret = -EBADMSG;
++	break;
++	  }
++
++err_free:
++  if (key)
++    free(key);
++
++  if (mpi_key)
++    rsa_free_mpi_key(mpi_key);
++
++  return ret;
++}
++
++/* ELF_SIGN */
++/* Verify the signature of the ELF PT_SIGN within the Program HDRs */
++static void
++verify_signature (const ElfW(Phdr) *phdr, unsigned int phnum,
++			   const char *buf, size_t len, struct link_map *map,
++			   int fd)
++{
++  int ret = -EINVAL;
++  const ElfW(Phdr) *ph;
++
++  for (ph = phdr; ph < &phdr[phnum]; ++ph)
++      switch (ph->p_type)
++	{
++    case PT_SIGN:
++      {
++	ret = -EBADMSG;
++    struct sha256_state sha256_ctx;
++    
++	sha256_init(&sha256_ctx);
++    ElfW(Ehdr) *ehdr = malloc (sizeof(ElfW(Ehdr)));
++    __pread64_nocancel(fd, ehdr, sizeof(ElfW(Ehdr)), 0);
++    ehdr->e_shoff = 0;
++    sha256_update(&sha256_ctx, (const u8 *)ehdr, sizeof(ElfW(Ehdr)));
++    void *digest = malloc (32);
++    sha256_final(&sha256_ctx, digest);
++    free(ehdr);
++
++    int cert_fd = __open64_nocancel ("/etc/elf-sign.crt", O_RDONLY | O_CLOEXEC);
++      if (cert_fd != -1) 
++	    {
++      struct __stat64_t64 st;
++	  __fstat64_time64 (cert_fd, &st);
++      
++	  void *data = malloc(st.st_size);
++      memset(data, 0, st.st_size);
++      __pread64_nocancel (cert_fd, data, st.st_size, 0);
++      struct x509_certificate *cert = x509_cert_parse(data, st.st_size);
++      free(data);
++
++	    if (!cert)
++          {
++        _dl_error_printf("Not able to parse the X509 certs\n");
++        break;
++          }
++
++      void *signed_digest = malloc(ph->p_filesz);
++      __pread64_nocancel (fd, signed_digest, ph->p_filesz, ph->p_offset);
++
++ 	  ret = pkcs1pad_sha256_rsa_verify(digest, 32, cert, signed_digest, 256);
++      free(signed_digest);
++        }
++      }
++    
++	break;
++
++    default:
++      continue;
++  }
++
++  if (ret != -EINVAL && ret) 
++    {
++  _dl_error_printf("Dynamic Linking Signature Verification Failed\n");
++	}
++
++  /* Stop linking or other processing */
++}
++
+ 
+ /* Open a file and verify it is an ELF file for this architecture.  We
+    ignore only ELF files for other architectures.  Non-ELF files and
+@@ -1774,6 +6717,12 @@
+ 	  return -1;
+ 	}
+ 
++      /* ELF_SIGN */
++      /* ELF_SIGN verify the signature if it doesnt work invoke security control 
++       * to make this really useful it needs to digest and sign with sechdr, phdr
++       * PT_LOAD density based digest
++       */
++  verify_signature (phdr, ehdr->e_phnum, fbp->buf, fbp->len, loader, fd);
+     }
+ 
+   return fd;
+@@ -2051,12 +7000,13 @@
+ 	  if (fd == -1 && !did_main_map
+ 	      && main_map != NULL && main_map->l_type != lt_loaded
+ 	      && cache_rpath (main_map, &main_map->l_rpath_dirs, DT_RPATH,
+-			      "RPATH"))
++			      "RPATH")) 
++        {
+ 	    fd = open_path (name, namelen, mode,
+ 			    &main_map->l_rpath_dirs,
+ 			    &realname, &fb, loader ?: main_map, LA_SER_RUNPATH,
+ 			    &found_other_class);
+-
++        }
+ 	  /* Also try DT_RUNPATH in the executable for LD_AUDIT dlopen
+ 	     call.  */
+ 	  if (__glibc_unlikely (mode & __RTLD_AUDIT)
+@@ -2066,20 +7016,23 @@
+ 	      struct r_search_path_struct l_rpath_dirs;
+ 	      l_rpath_dirs.dirs = NULL;
+ 	      if (cache_rpath (main_map, &l_rpath_dirs,
+-			       DT_RUNPATH, "RUNPATH"))
++			       DT_RUNPATH, "RUNPATH")) 
++        {
+ 		fd = open_path (name, namelen, mode, &l_rpath_dirs,
+ 				&realname, &fb, loader ?: main_map,
+ 				LA_SER_RUNPATH, &found_other_class);
++        }
+ 	    }
+ 	}
+ 
+       /* Try the LD_LIBRARY_PATH environment variable.  */
+       if (fd == -1 && __rtld_env_path_list.dirs != (void *) -1)
++      {
+ 	fd = open_path (name, namelen, mode, &__rtld_env_path_list,
+ 			&realname, &fb,
+ 			loader ?: GL(dl_ns)[LM_ID_BASE]._ns_loaded,
+ 			LA_SER_LIBPATH, &found_other_class);
+-
++      }
+       /* Look at the RUNPATH information for this binary.  */
+       if (fd == -1 && loader != NULL
+ 	  && cache_rpath (loader, &loader->l_runpath_dirs,
+@@ -2164,10 +7117,11 @@
+       if (fd == -1
+ 	  && ((l = loader ?: GL(dl_ns)[nsid]._ns_loaded) == NULL
+ 	      || __glibc_likely (!(l->l_flags_1 & DF_1_NODEFLIB)))
+-	  && __rtld_search_dirs.dirs != (void *) -1)
++	  && __rtld_search_dirs.dirs != (void *) -1) 
++    {
+ 	fd = open_path (name, namelen, mode, &__rtld_search_dirs,
+ 			&realname, &fb, l, LA_SER_DEFAULT, &found_other_class);
+-
++    }
+       /* Add another newline when we are tracing the library loading.  */
+       if (__glibc_unlikely (GLRO(dl_debug_mask) & DL_DEBUG_LIBS))
+ 	_dl_debug_printf ("\n");
