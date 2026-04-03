@@ -1,0 +1,1021 @@
+Upstream-Status: Pending [zhe.alex.zhao@gmail.com]
+Signed-off-by: Khem Raj <raj.khem@gmail.com>
+---
+diff --git a/bfd/elf.c b/bfd/elf.c
+index dfa04c9268d..11972df5123 100644
+--- a/bfd/elf.c
++++ b/bfd/elf.c
+@@ -1457,6 +1457,7 @@ get_segment_type (unsigned int p_type)
+     case PT_SHLIB: pt = "SHLIB"; break;
+     case PT_PHDR: pt = "PHDR"; break;
+     case PT_TLS: pt = "TLS"; break;
++    case PT_SIGN: pt = "SIGN"; break;
+     case PT_GNU_EH_FRAME: pt = "EH_FRAME"; break;
+     case PT_GNU_STACK: pt = "STACK"; break;
+     case PT_GNU_RELRO: pt = "RELRO"; break;
+@@ -3113,6 +3114,7 @@ static const struct bfd_elf_special_section special_sections_s[] =
+   /* See struct bfd_elf_special_section declaration for the semantics of
+      this special case where .prefix_length != strlen (.prefix).  */
+   { ".stabstr",			5,  3, SHT_STRTAB, 0 },
++  { STRING_COMMA_LEN (".signature"),0, SHT_PROGBITS, SHF_ALLOC },
+   { NULL,			0,  0, 0,	   0 }
+ };
+ 
+@@ -3432,6 +3434,9 @@ bfd_section_from_phdr (bfd *abfd, Elf_Internal_Phdr *hdr, int hdr_index)
+     case PT_PHDR:
+       return _bfd_elf_make_section_from_phdr (abfd, hdr, hdr_index, "phdr");
+ 
++    case PT_SIGN:
++      return _bfd_elf_make_section_from_phdr (abfd, hdr, hdr_index, "signature");
++
+     case PT_GNU_EH_FRAME:
+       return _bfd_elf_make_section_from_phdr (abfd, hdr, hdr_index,
+ 					      "eh_frame_hdr");
+@@ -4730,6 +4735,12 @@ _bfd_elf_compute_section_file_positions (bfd *abfd,
+   return false;
+ }
+ 
++static asection *
++elf_eh_signature_hdr (struct bfd *abfd)
++{
++  return bfd_get_section_by_name (abfd, ".signature");
++}
++
+ /* Retrieve .eh_frame_hdr.  Prior to size_dynamic_sections the
+    function effectively returns whether --eh-frame-hdr is given on the
+    command line.  After size_dynamic_sections the result reflects
+@@ -4780,6 +4791,12 @@ get_program_header_size (bfd *abfd, struct bfd_link_info *info)
+       ++segs;
+     }
+ 
++  if (elf_eh_signature_hdr (abfd) != NULL)
++    {
++       /* We need a PG_SIGN segment */
++       ++segs;
++    }
++
+   if (elf_eh_frame_hdr (info))
+     {
+       /* We need a PT_GNU_EH_FRAME segment.  */
+@@ -5062,7 +5079,7 @@ _bfd_elf_map_sections_to_segments (bfd *abfd,
+       unsigned int tls_count = 0;
+       asection *first_tls = NULL;
+       asection *first_mbind = NULL;
+-      asection *dynsec, *eh_frame_hdr;
++      asection *dynsec, *eh_signature_hdr, *eh_frame_hdr;
+       asection *sframe;
+       size_t amt;
+       bfd_vma addr_mask, wrap_to = 0;  /* Bytes.  */
+@@ -5542,6 +5559,30 @@ _bfd_elf_map_sections_to_segments (bfd *abfd,
+ 	  pm = &m->next;
+ 	}
+ 
++      /* Always throw in .signature and throw in a  PT_SIGN segment */
++      eh_signature_hdr = elf_eh_signature_hdr (abfd);
++      if (eh_signature_hdr != NULL && eh_signature_hdr->size != 0)
++	{
++	  amt = sizeof (struct elf_segment_map) + sizeof (asection *);
++	  m = (struct elf_segment_map *) bfd_zalloc (abfd, amt);
++	  if (m == NULL)
++	    goto error_return;
++	  m->next = NULL;
++	  m->p_type = PT_SIGN;
++	  m->count = 1;
++	  m->p_flags_valid = 1;
++	  m->sections[0] = eh_signature_hdr;
++	  m->p_flags = PF_R;
++	  m->p_align = 4;
++	  m->p_align_valid = 1;
++
++	  // modify .signature attribute here is not a good idea
++	  eh_signature_hdr->output_section->flags |= SEC_LOAD;
++
++	  *pm = m;
++	  pm = &m->next;
++	}
++
+       /* If there is a .eh_frame_hdr section, throw in a PT_GNU_EH_FRAME
+ 	 segment.  */
+       eh_frame_hdr = elf_eh_frame_hdr (info);
+diff --git a/binutils/Makefile.am b/binutils/Makefile.am
+index 1528302ea61..2a20359f3e1 100644
+--- a/binutils/Makefile.am
++++ b/binutils/Makefile.am
+@@ -72,6 +72,8 @@ READELF_PROG=readelf
+ 
+ ELFEDIT_PROG=elfedit
+ 
++ELFSIGN_PROG=elfsign
++
+ # These should all be the same program too.
+ SIZE_PROG=size
+ NM_PROG=nm-new
+@@ -90,7 +92,7 @@ DLLWRAP_PROG=dllwrap
+ 
+ SRCONV_PROG=srconv$(EXEEXT) sysdump$(EXEEXT) coffdump$(EXEEXT)
+ 
+-bin_PROGRAMS = $(SIZE_PROG) $(OBJDUMP_PROG) $(AR_PROG) $(STRINGS_PROG) $(RANLIB_PROG) $(OBJCOPY_PROG) @BUILD_SRCONV@ @BUILD_DLLTOOL@ @BUILD_WINDRES@ @BUILD_WINDMC@ $(ADDR2LINE_PROG) $(READELF_PROG) $(ELFEDIT_PROG) @BUILD_DLLWRAP@
++bin_PROGRAMS = $(SIZE_PROG) $(OBJDUMP_PROG) $(AR_PROG) $(STRINGS_PROG) $(RANLIB_PROG) $(OBJCOPY_PROG) @BUILD_SRCONV@ @BUILD_DLLTOOL@ @BUILD_WINDRES@ @BUILD_WINDMC@ $(ADDR2LINE_PROG) $(READELF_PROG) $(ELFEDIT_PROG) $(ELFSIGN_PROG) @BUILD_DLLWRAP@
+ 
+ bin_SCRIPTS = @BUILD_INSTALL_MISC@
+ EXTRA_SCRIPTS = embedspu
+@@ -110,7 +112,7 @@ noinst_PROGRAMS = $(RENAMED_PROGS) $(TEST_PROGS) @BUILD_MISC@
+ EXTRA_PROGRAMS = srconv sysdump coffdump $(DLLTOOL_PROG) $(WINDRES_PROG) $(WINDMC_PROG) $(DLLWRAP_PROG)
+ 
+ # Stuff that goes in tooldir/ if appropriate.
+-TOOL_PROGS = nm-new strip-new ar ranlib dlltool objdump objcopy readelf
++TOOL_PROGS = nm-new strip-new ar ranlib dlltool objdump objcopy readelf elfsign
+ 
+ BASEDIR = $(srcdir)/..
+ BFDDIR = $(BASEDIR)/bfd
+@@ -146,7 +148,7 @@ CFILES = \
+ 	size.c srconv.c stabs.c strings.c sysdump.c \
+ 	syslex_wrap.c unwind-ia64.c elfedit.c version.c \
+ 	windres.c winduni.c wrstabs.c \
+-	windmc.c mclex.c
++	windmc.c mclex.c elfsign.c
+ 
+ GENERATED_CFILES = \
+ 	arparse.c arlex.c sysroff.c sysinfo.c syslex.c \
+@@ -250,6 +252,7 @@ elfedit_DEPENDENCIES = $(LIBINTL_DEP) $(LIBIBERTY)
+ dllwrap_DEPENDENCIES =   $(LIBINTL_DEP) $(LIBIBERTY)
+ bfdtest1_DEPENDENCIES =  $(LIBINTL_DEP) $(LIBIBERTY) $(BFDLIB)
+ bfdtest2_DEPENDENCIES =  $(LIBINTL_DEP) $(LIBIBERTY) $(BFDLIB)
++elfsign_DEPENDENCIES = $(LIBINTL_DEP) $(LIBIBERTY) $(BFDLIB)
+ 
+ LDADD = $(BFDLIB) $(LIBIBERTY) $(LIBINTL)
+ 
+@@ -265,6 +268,10 @@ readelf_LDADD   = $(LIBCTF_NOBFD) $(LIBINTL) $(LIBIBERTY) $(ZLIB) $(ZSTD_LIBS) $
+ elfedit_SOURCES = elfedit.c version.c $(ELFLIBS)
+ elfedit_LDADD = $(LIBINTL) $(LIBIBERTY)
+ 
++# Extra dependency on -lssl, -lcrypto
++elfsign_SOURCES = elfsign.c $(BULIBS) $(ELFLIBS)
++elfsign_LDADD = $(LDADD) -lssl -lcrypto
++
+ strip_new_SOURCES = is-strip.c rename.c $(WRITE_DEBUG_SRCS) $(BULIBS)
+ 
+ nm_new_SOURCES = nm.c demanguse.c $(BULIBS)
+diff --git a/binutils/Makefile.in b/binutils/Makefile.in
+index 549b5a361c8..5d3ba3cfa06 100644
+--- a/binutils/Makefile.in
++++ b/binutils/Makefile.in
+@@ -129,7 +129,7 @@ target_triplet = @target@
+ bin_PROGRAMS = $(am__EXEEXT_5) $(am__EXEEXT_6) $(am__EXEEXT_7) \
+ 	$(am__EXEEXT_8) $(am__EXEEXT_9) $(am__EXEEXT_10) \
+ 	@BUILD_SRCONV@ @BUILD_DLLTOOL@ @BUILD_WINDRES@ @BUILD_WINDMC@ \
+-	$(am__EXEEXT_11) $(am__EXEEXT_12) $(am__EXEEXT_13) \
++	$(am__EXEEXT_11) $(am__EXEEXT_12) $(am__EXEEXT_13) $(am__EXEEXT_22) \
+ 	@BUILD_DLLWRAP@ $(am__empty)
+ noinst_PROGRAMS = $(am__EXEEXT_17) $(am__EXEEXT_21) @BUILD_MISC@
+ EXTRA_PROGRAMS = srconv$(EXEEXT) sysdump$(EXEEXT) coffdump$(EXEEXT) \
+@@ -198,6 +198,7 @@ am__EXEEXT_18 = bfdtest1$(EXEEXT)
+ am__EXEEXT_19 = bfdtest2$(EXEEXT)
+ am__EXEEXT_20 = testsuite/gentestdlls$(EXEEXT)
+ am__EXEEXT_21 = $(am__EXEEXT_18) $(am__EXEEXT_19) $(am__EXEEXT_20)
++am__EXEEXT_22 = elfsign$(EXEEXT)
+ PROGRAMS = $(bin_PROGRAMS) $(noinst_PROGRAMS)
+ am__objects_1 = bucomm.$(OBJEXT) version.$(OBJEXT) filemode.$(OBJEXT)
+ am_addr2line_OBJECTS = addr2line.$(OBJEXT) $(am__objects_1)
+@@ -289,6 +290,8 @@ am_windres_OBJECTS = windres.$(OBJEXT) resrc.$(OBJEXT) \
+ 	rclex.$(OBJEXT) winduni.$(OBJEXT) resres.$(OBJEXT) \
+ 	$(am__objects_1)
+ windres_OBJECTS = $(am_windres_OBJECTS)
++am_elfsign_OBJECTS = elfsign.$(OBJEXT) $(am__objects_4) $(am__objects_1) $(am__objects_2)
++elfsign_OBJECTS = $(am_elfsign_OBJECTS)
+ am__vpath_adj_setup = srcdirstrip=`echo "$(srcdir)" | sed 's|.|.|g'`;
+ am__vpath_adj = case $$p in \
+     $(srcdir)/*) f=`echo "$$p" | sed "s|^$$srcdirstrip/||"`;; \
+@@ -377,7 +380,7 @@ SOURCES = $(addr2line_SOURCES) $(ar_SOURCES) $(EXTRA_ar_SOURCES) \
+ 	$(EXTRA_objdump_SOURCES) $(ranlib_SOURCES) $(readelf_SOURCES) \
+ 	$(size_SOURCES) $(srconv_SOURCES) $(strings_SOURCES) \
+ 	$(strip_new_SOURCES) $(sysdump_SOURCES) \
+-	testsuite/gentestdlls.c $(windmc_SOURCES) $(windres_SOURCES)
++	testsuite/gentestdlls.c $(windmc_SOURCES) $(windres_SOURCES) $(elfsign_SOURCES)
+ AM_V_DVIPS = $(am__v_DVIPS_@AM_V@)
+ am__v_DVIPS_ = $(am__v_DVIPS_@AM_DEFAULT_V@)
+ am__v_DVIPS_0 = @echo "  DVIPS   " $@;
+@@ -688,6 +691,7 @@ bin_SCRIPTS = @BUILD_INSTALL_MISC@
+ EXTRA_SCRIPTS = embedspu
+ BFDTEST1_PROG = bfdtest1
+ BFDTEST2_PROG = bfdtest2
++ELFSIGN_PROG = elfsign
+ GENTESTDLLS_PROG = testsuite/gentestdlls
+ TEST_PROGS = $(BFDTEST1_PROG) $(BFDTEST2_PROG) $(GENTESTDLLS_PROG)
+ RENAMED_PROGS = $(NM_PROG) $(STRIP_PROG) $(DEMANGLER_PROG)
+@@ -726,7 +730,7 @@ CFILES = \
+ 	size.c srconv.c stabs.c strings.c sysdump.c \
+ 	syslex_wrap.c unwind-ia64.c elfedit.c version.c \
+ 	windres.c winduni.c wrstabs.c \
+-	windmc.c mclex.c
++	windmc.c mclex.c elfsign.c
+ 
+ GENERATED_CFILES = \
+ 	arparse.c arlex.c sysroff.c sysinfo.c syslex.c \
+@@ -791,6 +795,7 @@ elfedit_DEPENDENCIES = $(LIBINTL_DEP) $(LIBIBERTY)
+ dllwrap_DEPENDENCIES = $(LIBINTL_DEP) $(LIBIBERTY)
+ bfdtest1_DEPENDENCIES = $(LIBINTL_DEP) $(LIBIBERTY) $(BFDLIB)
+ bfdtest2_DEPENDENCIES = $(LIBINTL_DEP) $(LIBIBERTY) $(BFDLIB)
++elfsign_DEPENDENCIES = $(LIBINTL_DEP) $(LIBIBERTY) $(BFDLIB)
+ LDADD = $(BFDLIB) $(LIBIBERTY) $(LIBINTL)
+ size_SOURCES = size.c $(BULIBS)
+ objcopy_SOURCES = not-strip.c rename.c $(WRITE_DEBUG_SRCS) $(BULIBS)
+@@ -833,7 +838,8 @@ dllwrap_LDADD = $(LIBIBERTY) $(LIBINTL)
+ EXTRA_DIST = arparse.c arparse.h arlex.c sysinfo.c sysinfo.h \
+ 	syslex.c deflex.c defparse.h defparse.c rcparse.h rcparse.c \
+ 	mcparse.h mcparse.c embedspu.sh
+-
++elfsign_SOURCES = elfsign.c $(BULIBS) $(ELFLIBS)
++elfsign_LDADD = $(LDADD) -lssl -lcrypto
+ 
+ # development.sh is used to determine -Werror default.
+ CONFIG_STATUS_DEPENDENCIES = $(BFDDIR)/development.sh
+@@ -1104,6 +1110,11 @@ rcparse.h: rcparse.c
+ windres$(EXEEXT): $(windres_OBJECTS) $(windres_DEPENDENCIES) $(EXTRA_windres_DEPENDENCIES) 
+ 	@rm -f windres$(EXEEXT)
+ 	$(AM_V_CCLD)$(LINK) $(windres_OBJECTS) $(windres_LDADD) $(LIBS)
++
++elfsign$(EXEEXT): $(elfsign_OBJECTS) $(elfsign_DEPENDENCIES) $(EXTRA_elfsign_DEPENDENCIES)
++	@rm -f elfsign$(EXEEXT)
++	$(AM_V_CCLD)$(LINK) $(elfsign_OBJECTS) $(elfsign_LDADD) $(LIBS)
++
+ install-binSCRIPTS: $(bin_SCRIPTS)
+ 	@$(NORMAL_INSTALL)
+ 	@list='$(bin_SCRIPTS)'; test -n "$(bindir)" || list=; \
+diff --git a/binutils/elfsign.c b/binutils/elfsign.c
+new file mode 100644
+index 00000000000..8639e3d71c9
+--- /dev/null
++++ b/binutils/elfsign.c
+@@ -0,0 +1,651 @@
++/* elfsign.c -- generate signature of the ELF save it to PT_SIGN program header
++   Copyright (C) 2010-2025 Free Software Foundation, Inc.
++
++   Author: Alex Zhao, zhe.alex.zhao@gmail.com
++   only sign the headers of the executable files
++   consider it is fast during dynamic loading, and modify executable
++   without modify its headers normally will break the dynamic loading
++ */
++#include <stdlib.h>
++#include <stdio.h>
++#include <unistd.h>
++#include <getopt.h>
++#include <sys/types.h>
++
++#include <openssl/evp.h>
++#include <openssl/pem.h>
++
++//#define DIGEST_DUMP
++
++#define SIGNATURE_LEN 256
++
++#define EI_NIDENT 16
++typedef u_int16_t Elf64_Half;
++typedef u_int32_t Elf64_Word;
++typedef u_int64_t Elf64_Addr;
++typedef u_int64_t Elf64_Off;
++typedef u_int64_t Elf64_Xword;
++typedef u_int64_t Elf64_Sxword;
++
++typedef u_int16_t Elf32_Half;
++typedef u_int32_t Elf32_Word;
++typedef u_int32_t Elf32_Addr;
++typedef u_int32_t Elf32_Off;
++typedef u_int32_t Elf32_Xword;
++typedef u_int32_t Elf32_Sxword;
++
++#define ET_NONE   0
++#define ET_REL    1
++// Only support below types signature
++#define ET_EXEC   2
++#define ET_DYN    3
++// No signature required
++#define ET_CORE   4
++#define ET_LOOS   0xfe00
++#define ET_HIOS   0xfeff
++#define ET_LOPROC 0xff00
++#define ET_HIPROC 0xffff
++
++// e_ident[EI_idx]
++#define EI_MAG0        0
++#define EI_MAG1        1
++#define EI_MAG2        2
++#define EI_MAG3        3
++#define EI_CLASS       4
++#define EI_DATA        5
++#define EI_VERSION     6
++#define EI_OSABI       7
++#define EI_ABIVERSION  8
++#define EI_PAD         9
++#define EI_NIDENT     16
++
++#define ELFCLASSNONE  0
++#define ELFCLASS32    1
++#define ELFCLASS64    2
++
++#define ELFDATANONE   0
++#define ELFDATA2LSB   1
++#define ELFDATA2MSB   2
++
++#define PT_SIGN 0x10000000
++
++typedef struct {
++        unsigned char e_ident[EI_NIDENT];
++} Elf_Ehdr;
++
++typedef struct {
++        unsigned char e_ident[EI_NIDENT];
++        Elf64_Half e_type;
++        Elf64_Half e_machine;
++        Elf64_Word e_version;
++        Elf64_Addr e_entry;
++        Elf64_Off e_phoff;
++        Elf64_Off e_shoff;
++        Elf64_Word e_flags;
++        Elf64_Half e_ehsize;
++        Elf64_Half e_phentsize;
++        Elf64_Half e_phnum;
++        Elf64_Half e_shentsize;
++        Elf64_Half e_shnum;
++        Elf64_Half e_shstrndx;
++} Elf64_Ehdr;
++
++typedef struct {
++        Elf64_Word p_type;
++        Elf64_Word p_flags;
++        Elf64_Off p_offset;
++        Elf64_Addr p_vaddr;
++        Elf64_Addr p_paddr;
++        Elf64_Xword p_filesz;
++        Elf64_Xword p_memsz;
++        Elf64_Xword p_align;
++} Elf64_Phdr;
++
++typedef struct {
++        Elf64_Word sh_name;
++        Elf64_Word sh_type;
++        Elf64_Xword sh_flags;
++        Elf64_Addr sh_addr;
++        Elf64_Off sh_offset;
++        Elf64_Xword sh_size;
++        Elf64_Word sh_link;
++        Elf64_Word sh_info;
++        Elf64_Xword sh_addralign;
++        Elf64_Xword sh_entsize;
++} Elf64_Shdr;
++
++typedef struct {
++        unsigned char e_ident[EI_NIDENT];
++        Elf32_Half e_type;
++        Elf32_Half e_machine;
++        Elf32_Word e_version;
++        Elf32_Addr e_entry;
++        Elf32_Off e_phoff;
++        Elf32_Off e_shoff;
++        Elf32_Word e_flags;
++        Elf32_Half e_ehsize;
++        Elf32_Half e_phentsize;
++        Elf32_Half e_phnum;
++        Elf32_Half e_shentsize;
++        Elf32_Half e_shnum;
++        Elf32_Half e_shstrndx;
++} Elf32_Ehdr;
++
++typedef struct {
++        Elf32_Word sh_name;
++        Elf32_Word sh_type;
++        Elf32_Word sh_flags;
++        Elf32_Addr sh_addr;
++        Elf32_Off sh_offset;
++        Elf32_Word sh_size;
++        Elf32_Word sh_link;
++        Elf32_Word sh_info;
++        Elf32_Word sh_addralign;
++        Elf32_Word sh_entsize;
++} Elf32_Shdr;
++
++typedef struct {
++        Elf32_Word p_type;
++        Elf32_Off p_offset;
++        Elf32_Addr p_vaddr;
++        Elf32_Addr p_paddr;
++        Elf32_Word p_filesz;
++        Elf32_Word p_memsz;
++        Elf32_Word p_flags;
++        Elf32_Word p_align;
++} Elf32_Phdr;
++
++#define MAX_FILE_NAME_LEN 4096
++
++static char *program_name = NULL;
++static int is_32_bit = 0;
++
++static int 
++digest_hdr_buffer_len(int phdr_num, int shdr_num) 
++{
++  /* digest contents include ELF HEADER, all Program Headers and all Section Headers */
++  if (is_32_bit)
++    return sizeof(Elf32_Ehdr) + phdr_num * sizeof(Elf32_Phdr) + shdr_num * sizeof(Elf32_Shdr);
++  else
++    return sizeof(Elf64_Ehdr) + phdr_num * sizeof(Elf64_Phdr) + shdr_num * sizeof(Elf64_Shdr);
++}
++
++/*
++ * Copy and arrange the contents need to be signed within single buffer
++ */
++static int
++prepare_digest_buffer (FILE *input, Elf64_Ehdr *ehdr, void *buffer)
++{
++  char *phdrs = (char *)buffer + sizeof(Elf64_Ehdr);
++  char *shdrs = (char *)buffer + sizeof(Elf64_Ehdr) + ehdr->e_phnum * sizeof(Elf64_Phdr);
++
++  if ((fseek (input, 0, SEEK_SET) != 0) || (fread (buffer, 1, sizeof(Elf64_Ehdr), input) != sizeof(Elf64_Ehdr)))
++    return -1;
++  if ((fseek (input, ehdr->e_phoff, SEEK_SET) != 0) || (fread (phdrs, 1, ehdr->e_phnum * sizeof(Elf64_Phdr), input) != ehdr->e_phnum * sizeof(Elf64_Phdr)))
++    return -1;
++  if ((fseek (input, ehdr->e_shoff, SEEK_SET) != 0) || (fread (shdrs, 1, ehdr->e_shnum * sizeof(Elf64_Shdr), input) != ehdr->e_shnum * sizeof(Elf64_Shdr)))
++    return -1;
++
++  return 0;
++}
++
++#ifdef DIGEST_DUMP
++static void 
++dump_digest_content (void *buffer, int buf_len)
++{
++  unsigned char *ptr = (unsigned char *)buffer;
++
++  printf("digested target hdrs %d:", buf_len);
++  for (int i = 0; i < buf_len; i++)
++    {
++      if (i % 16 == 0)
++        printf("\n");
++      printf("%02x ", ptr[i]);
++      if ((i+1) % 8 == 0)
++        printf(" ");
++    }
++    printf("\n");
++}
++
++static void
++dump_digest (void *digest, int digest_len)
++{
++  printf ("------ digest of the content -----\n");
++  unsigned char *ptr = (unsigned char *)digest;
++  for (int i = 0; i < digest_len; i++)
++    {
++      if (i % 16 == 0)
++        printf("\n");
++      printf("%02x ", ptr[i]);
++      if ((i+1) % 8 == 0)
++        printf(" ");
++    }
++    printf("\n");
++}
++
++
++static void
++dump_signature (void *signature, int sig_len)
++{
++  printf ("------ signature of the digest -----\n");
++  unsigned char *ptr = (unsigned char *)signature;
++  for (int i = 0; i < sig_len; i++)
++    {
++      if (i % 16 == 0)
++        printf("\n");
++      printf("%02x ", ptr[i]);
++      if ((i+1) % 8 == 0)
++        printf(" ");
++    }
++    printf("\n");
++
++}
++#endif
++
++#define SHA256_DIGEST_LEN 32
++#define SIGNATURE_LEN 256
++#define BUFFER_SIZE 4096
++
++/*
++ * Calculate PT_SIGN section of ELF binary
++ * Copy data from OpenSSL allocated data to xmalloc data
++ */
++static int 
++calculate_sign_section (FILE *input, Elf64_Ehdr *ehdr, void *signature, size_t len, const char *priv_key)
++{  
++  EVP_MD_CTX *ctx = NULL;
++  EVP_PKEY *pkey = NULL;
++  EVP_PKEY_CTX *pctx = NULL;
++  
++  unsigned int digest_len = 0;
++  FILE *key = NULL;
++  int ret = 1;
++  void *tmp = NULL;
++  void *digest = NULL;
++
++  if (ehdr == NULL)
++    goto err;
++ 
++  int phdr_num = ehdr->e_phnum;
++  int shdr_num = ehdr->e_shnum;
++    
++  int buf_len = digest_hdr_buffer_len (phdr_num, shdr_num);
++  void *buffer = malloc (buf_len);
++  if (!buffer)
++    goto err;
++
++  if (prepare_digest_buffer (input, ehdr, buffer))
++    goto err_close_key;
++
++  key = fopen(priv_key, "r");
++  if (key == NULL)
++    goto err_close_key;
++
++  pkey = PEM_read_PrivateKey (key, NULL, NULL, NULL);
++  if (pkey == NULL)
++    goto err_close_key;
++
++  ctx = EVP_MD_CTX_new ();
++  if (ctx == NULL)
++    goto err_close_key;
++
++  if (EVP_DigestInit (ctx, EVP_sha256()) == 0)
++    goto err_free_ctx;
++
++  if (EVP_DigestUpdate (ctx, buffer, buf_len) == 0)
++    goto err_free_ctx;
++
++#ifdef DIGEST_DUMP
++  dump_digest_content (buffer, buf_len);
++#endif
++
++  digest = OPENSSL_malloc (SHA256_DIGEST_LEN);
++  if (digest == NULL)
++    goto err_free_ctx;
++
++  if (EVP_DigestFinal (ctx, digest, &digest_len) == 0)
++    goto err_free_ctx;
++
++#ifdef DIGEST_DUMP
++  dump_digest (digest, digest_len);
++#endif
++
++  pctx = EVP_PKEY_CTX_new (pkey, NULL);
++  if (!pctx)
++    goto err_free_ctx;
++
++  size_t sig_len = 0;
++  if (EVP_PKEY_sign_init (pctx) <= 0)
++    goto err_free_ctx;
++
++  if (EVP_PKEY_CTX_set_rsa_padding (pctx, RSA_PKCS1_PADDING) <= 0)
++    goto err_free_ctx;
++
++  if (EVP_PKEY_CTX_set_signature_md (pctx, EVP_sha256 ()) <= 0)
++    goto err_free_ctx;
++
++  if (EVP_PKEY_sign (pctx, NULL, &sig_len, digest, digest_len) <= 0)
++    goto err_free_ctx;
++
++  tmp = OPENSSL_malloc (sig_len);
++  if (tmp == NULL)
++    goto err_free_ctx;
++
++  if (EVP_PKEY_sign (pctx, tmp, &sig_len, digest, digest_len) <= 0)
++    goto err_free_ctx;
++
++  if (len != sig_len)
++    goto err_free_ctx;
++  
++  memcpy (signature, tmp, sig_len);
++
++#ifdef DIGEST_DUMP
++  dump_signature (signature, sig_len);
++#endif
++
++  ret = 0;
++
++err_free_ctx:
++  if (tmp)
++    OPENSSL_free (tmp);
++
++  if (pctx)
++    EVP_PKEY_CTX_free (pctx);
++
++  if (digest)
++    OPENSSL_free (digest);
++
++  if (ctx)
++    EVP_MD_CTX_free (ctx);
++
++
++err_close_key:
++  if (pkey)
++    OPENSSL_free (pkey);
++
++  if (buffer)
++    free (buffer);
++
++
++  if (key)
++    fclose (key);
++
++err:
++  return ret;
++}
++
++/*
++ * This is no needed
++ * after linker can generate signature section
++ * direct use file open and sign will work, no BFD relevant modification required
++ */
++static int 
++sign_file (const char *input_elf, const char *private_key, const char *output_elf)
++{
++  FILE *input = NULL;
++  FILE *output = NULL;
++  char *signature = NULL;
++  char *tmp_elf = NULL;
++  char *buffer = NULL;
++  Elf64_Phdr *phdrs = NULL, *phdr = NULL;
++  size_t read_size = 0;
++  int success = 1;
++
++  input = fopen (input_elf, "r");
++  if (input == NULL)
++    goto err;
++
++  Elf64_Ehdr ehdr;
++  size_t read_len = fread (&ehdr, 1, sizeof(Elf64_Ehdr), input);
++  if (read_len != sizeof(Elf64_Ehdr))
++    goto err;
++
++  if (ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN) 
++    {
++      printf ("elfsign not support other object file than ELF executable or Shared library\n");
++      fclose(input);
++      goto err;
++    }
++
++  if (ehdr.e_ident[EI_CLASS] != ELFCLASS64) 
++    {
++      printf ("elfsign only support 64bit ELF file");
++      fclose(input);
++      goto err;
++    }
++
++  // Modify to support big endian ELF file
++  if (ehdr.e_ident[EI_DATA] != ELFDATA2LSB)
++    {
++      printf ("elfsign only support little endian ELF file");
++      fclose(input);
++      goto err;
++    }
++
++#ifdef DEBUG_ELFSIGN
++  printf ("Elf Data type %d, entry 0x%lx phdr offset 0x%lx phdr cnt %d, shdr offset 0x%lx shdr cnt %d\n", 
++              ehdr.e_type, ehdr.e_entry, ehdr.e_phoff, ehdr.e_phnum, ehdr.e_shoff, ehdr.e_shnum);
++#endif
++    
++  phdrs = malloc (sizeof (Elf64_Phdr) * ehdr.e_phnum);
++  if (phdrs == NULL) 
++    {
++      fclose (input);
++      goto err;
++    }
++
++  phdr = phdrs;
++  read_size = fread (phdrs, 1, sizeof (Elf64_Phdr) * ehdr.e_phnum, input);
++  if (read_size != (sizeof (Elf64_Phdr) * ehdr.e_phnum))
++    {
++      fclose (input);
++      goto err;
++    }
++
++  for (int i = 0; i < ehdr.e_phnum; i++) 
++    {
++      if (phdr->p_type == PT_SIGN) 
++        {
++          goto calc;
++        }
++      phdr++;
++    }
++
++  success = 2;
++
++  goto err;
++
++calc:
++
++  signature = malloc (SIGNATURE_LEN);
++  if (signature == NULL)
++    {
++      fclose(input);
++      goto err;
++    }
++
++  memset (signature, 0, SIGNATURE_LEN);
++
++  if (calculate_sign_section (input, &ehdr, signature, SIGNATURE_LEN, private_key))
++    {
++      fclose (input);
++      goto err;
++    }
++
++  tmp_elf = malloc (MAX_FILE_NAME_LEN);
++  if (tmp_elf == NULL)
++    {
++      fclose(input);
++      goto err;
++    }
++  memset (tmp_elf, 0, MAX_FILE_NAME_LEN);
++
++  snprintf (tmp_elf, MAX_FILE_NAME_LEN, "%s.tmp", output_elf);
++  output = fopen(tmp_elf, "w+");
++  if (output == NULL)
++    {
++      fclose(input);
++      goto err;
++    }
++
++  if (fseek(output, 0, SEEK_SET) !=0 || fseek(input, 0, SEEK_SET) != 0)
++    {
++      fclose(input);
++      fclose(output);
++      goto err;
++    }
++
++  buffer = malloc (BUFFER_SIZE);
++  if (buffer == NULL)
++    {
++      fclose(input);
++      fclose(output);
++      goto err;
++    }
++
++  while ((read_size = fread(buffer, 1, sizeof(buffer), input)) > 0) 
++    {
++      fwrite(buffer, 1, read_size, output);
++    }
++
++  fclose(input);
++
++  fseek(output, 0, SEEK_SET);
++  if (fread(&ehdr, 1, sizeof(Elf64_Ehdr), output) != sizeof(Elf64_Ehdr))
++    {
++      fclose(output);
++      goto err;
++    }
++
++  if (fseek(output, ehdr.e_phoff, SEEK_SET) != 0)
++    {
++      fclose(output);
++      goto err;
++    }
++
++  if (fread(phdrs, 1, sizeof(Elf64_Phdr) * ehdr.e_phnum, output) != (sizeof(Elf64_Phdr) * ehdr.e_phnum))
++    {
++      fclose(output);
++      goto err;
++    }
++    
++  phdr = phdrs;
++  for (int i = 0; i < ehdr.e_phnum; i++) 
++    {
++      if (phdr->p_type == PT_SIGN) 
++        {
++          fseek(output, phdr->p_offset, SEEK_SET);
++          fwrite(signature, 1, SIGNATURE_LEN, output);
++#ifdef DEBUG_ELFSIGN
++          printf ("update signature section, offset 0x%lx, size 0x%lx\n", phdr->p_offset, phdr->p_filesz);
++#endif
++          break;
++        }
++      phdr++;
++    }
++
++  fclose(output);
++
++  input = fopen(tmp_elf, "r");
++  if (input == NULL)
++    {
++      goto err;
++    }
++
++  output = fopen(output_elf, "w");
++  if (output == NULL)
++    {
++      fclose(input);
++      goto err;
++    }
++
++  while ((read_size = fread(buffer, 1, sizeof(buffer), input)) > 0) 
++    {
++      fwrite(buffer, 1, read_size, output);
++    }
++
++  fclose(input);
++  if (remove(tmp_elf))
++    {
++      printf("remove tmp file %s failed\n", tmp_elf);
++    }
++
++  fclose(output);
++
++  success = 0;
++
++err:
++  if (signature)
++    free (signature);
++
++  if (tmp_elf)
++    free (tmp_elf);
++
++  return success;
++}
++
++#define OPTION_PRIVATE_KEY 1
++#define OPTION_INPUT 2
++#define OPTION_OUTPUT 3
++
++struct option options[] = {
++    {"private-key", required_argument, NULL, OPTION_PRIVATE_KEY},
++    {"input", required_argument, NULL, OPTION_INPUT},
++    {"output", required_argument, NULL, OPTION_OUTPUT},
++    {0, 0, 0, 0}
++};
++
++//
++// Need to modify the ld 
++// the within ELF offset will be changed when add PT_SIGN with program header
++// may only use .signature section to store the signature, without buffer it at program header
++// This maybe simpler than modify linker
++//
++// Configure specific os relevant phdrs PT_SIGN to have the PT_SIGN configured during linking
++// phase, and use elfsign to regenerate the signature without impact the offset
++// This should works
++//
++int main(int argc, char *argv[])
++{
++  int c, status;
++  char *input_elf = NULL;
++  char *output_elf = NULL;
++  char *private_key = NULL;
++
++  /* Set elfsign name */
++  program_name = argv[0];
++
++  while ((c = getopt_long (argc, argv, "hv", options, (int *) 0)) != EOF) 
++    {
++      switch (c) {
++        case OPTION_PRIVATE_KEY:
++          private_key = optarg;
++          break;
++        case OPTION_INPUT:
++          input_elf = optarg;
++          break;
++        case OPTION_OUTPUT:
++          output_elf = optarg;
++          break;
++        default:
++          break;
++      }
++    }
++
++  if (output_elf == NULL)
++    output_elf = input_elf;
++
++  if (input_elf == NULL || output_elf == NULL || private_key == NULL) 
++    {
++      printf("Not correct parameter require to have --input <file> --private_key <key> --output <file>\n");
++      status = -1;
++      return status;
++    }
++
++  status = sign_file (input_elf, private_key, output_elf);
++  if (status)
++    printf("Failed sign ELF %s with private key %s\n", input_elf, private_key);
++
++  return status;
++}
++
+diff --git a/binutils/readelf.c b/binutils/readelf.c
+index 8f188e8c3e2..a64937ac1f2 100644
+--- a/binutils/readelf.c
++++ b/binutils/readelf.c
+@@ -5572,6 +5572,7 @@ get_segment_type (Filedata * filedata, unsigned long p_type)
+     case PT_PHDR:	return "PHDR";
+     case PT_TLS:	return "TLS";
+     case PT_NUM:	return "NUM";
++    case PT_SIGN:       return "SIGN";
+     }
+ 
+   if ((p_type >= PT_LOOS) && (p_type <= PT_HIOS))
+diff --git a/elfcpp/elfcpp.h b/elfcpp/elfcpp.h
+index 3ceddbda19c..94e57e7385c 100644
+--- a/elfcpp/elfcpp.h
++++ b/elfcpp/elfcpp.h
+@@ -498,6 +498,8 @@ enum PT
+   PT_HIOS = 0x6fffffff,
+   PT_LOPROC = 0x70000000,
+   PT_HIPROC = 0x7fffffff,
++  // Signature Program Header
++  PT_SIGN = 0x10000000,
+   // The remaining values are not in the standard.
+   // Frame unwind information.
+   PT_GNU_EH_FRAME = 0x6474e550,
+diff --git a/gold/script.cc b/gold/script.cc
+index b9ee538991f..99be6a9e257 100644
+--- a/gold/script.cc
++++ b/gold/script.cc
+@@ -3300,6 +3300,7 @@ static struct
+   PHDR_TYPE(PT_SHLIB),
+   PHDR_TYPE(PT_PHDR),
+   PHDR_TYPE(PT_TLS),
++  PHDR_TYPE(PT_SIGN),
+   PHDR_TYPE(PT_GNU_EH_FRAME),
+   PHDR_TYPE(PT_GNU_STACK),
+   PHDR_TYPE(PT_GNU_RELRO)
+diff --git a/gprofng/src/Elf.cc b/gprofng/src/Elf.cc
+index e63e3c3fa68..dc842e1df67 100644
+--- a/gprofng/src/Elf.cc
++++ b/gprofng/src/Elf.cc
+@@ -888,6 +888,7 @@ get_elf_ptype_name (int t)
+   RET_S (PT_PHDR);
+   RET_S (PT_TLS);
+   RET_S (PT_LOOS);
++  RET_S (PT_SIGN);
+   RET_S (PT_GNU_EH_FRAME);
+   RET_S (PT_GNU_EH_FRAME);
+   RET_S (PT_HIOS);
+diff --git a/include/elf/common.h b/include/elf/common.h
+index 0d9a7b7a8a9..cd39482b57e 100644
+--- a/include/elf/common.h
++++ b/include/elf/common.h
+@@ -481,6 +481,8 @@
+ #define PT_TLS		7		/* Thread local storage segment */
+ #define	PT_NUM		8		/* Number of defined types.  */
+ 
++#define PT_SIGN 	0x10000000	/* ELF Signature */
++
+ #define PT_LOOS		0x60000000	/* OS-specific */
+ #define PT_HIOS		0x6fffffff	/* OS-specific */
+ 
+diff --git a/include/elf/internal.h b/include/elf/internal.h
+index 9c546741ad8..29170753834 100644
+--- a/include/elf/internal.h
++++ b/include/elf/internal.h
+@@ -336,6 +336,7 @@ struct elf_segment_map
+    && !(((sec_hdr)->sh_flags & SHF_ALLOC) == 0				\
+ 	&& ((segment)->p_type == PT_LOAD				\
+ 	    || (segment)->p_type == PT_DYNAMIC				\
++	    || (segment)->p_type == PT_SIGN                             \
+ 	    || (segment)->p_type == PT_GNU_EH_FRAME			\
+ 	    || (segment)->p_type == PT_GNU_STACK			\
+ 	    || (segment)->p_type == PT_GNU_RELRO			\
+diff --git a/ld/ldgram.y b/ld/ldgram.y
+index 6635e598562..70c4006a37a 100644
+--- a/ld/ldgram.y
++++ b/ld/ldgram.y
+@@ -1304,7 +1304,9 @@ phdr_type:
+ 			  }
+ 		      if (i == sizeof phdr_types / sizeof phdr_types[0])
+ 			{
+-			  if (strcmp (s, "PT_GNU_EH_FRAME") == 0)
++                          if (strcmp (s, "PT_SIGN") == 0)
++                            $$ = exp_intop (0x10000000);
++			  else if (strcmp (s, "PT_GNU_EH_FRAME") == 0)
+ 			    $$ = exp_intop (0x6474e550);
+ 			  else if (strcmp (s, "PT_GNU_STACK") == 0)
+ 			    $$ = exp_intop (0x6474e551);
+diff --git a/ld/scripttempl/elf.sc b/ld/scripttempl/elf.sc
+index be8d19fcf11..3eb98ca4aed 100644
+--- a/ld/scripttempl/elf.sc
++++ b/ld/scripttempl/elf.sc
+@@ -1005,6 +1005,17 @@ cat <<EOF
+ EOF
+ }
+ 
++emit_signature()
++{
++cat <<EOF
++  /* Signature. */
++  .signature : ALIGN(4)
++  {
++    . = . + 256;
++  } = 0x0000
++EOF
++}
++
+ # ===========================================================================
+ # The script:
+ 
+@@ -1075,6 +1086,8 @@ EOF
+ 
+   emit_rodata
+ 
++  emit_signature
++
+   #------Read Write Data ----------------------------------------------------
+ 
+   align_data
