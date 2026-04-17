@@ -1,34 +1,100 @@
---- glibc-2.38/elf/dl-load.c	2023-08-01 01:54:16.000000000 +0800
-+++ glibc-2.38-umbrella/elf/dl-load.c	2023-10-03 20:38:06.213548310 +0800
-@@ -942,6 +942,7 @@
- 			struct link_map *loader, int l_type, int mode,
- 			void **stack_endp, Lmid_t nsid)
- {
-+  _dl_error_printf("%s:%d Map object to memory space from fd %s\n", __func__, __LINE__, name);
-   struct link_map *l = NULL;
-   const ElfW(Ehdr) *header;
-   const ElfW(Phdr) *phdr;
-@@ -1546,7 +1547,7 @@
- 	    *endp = '\0';
- #endif
+Upstream-Status: Pending [zhe.alex.zhao@gmail.com]
+Signed-off-by: Alex Zhao [zhe.alex.zhao@gmail.com]
+---
+diff --git a/elf/Makefile b/elf/Makefile
+index 3a5596e2bb..202ef9bbd2 100644
+--- a/elf/Makefile
++++ b/elf/Makefile
+@@ -65,6 +65,7 @@ dl-routines = \
+   dl-find_object \
+   dl-fini \
+   dl-init \
++  dl-sig \
+   dl-load \
+   dl-lookup \
+   dl-lookup-direct \
+diff --git a/elf/dl-load.c b/elf/dl-load.c
+index 00b9da9ec7..28a928edf4 100644
+--- a/elf/dl-load.c
++++ b/elf/dl-load.c
+@@ -1510,6 +1510,10 @@ print_search_path (struct r_search_path_elem **list,
+     _dl_debug_printf_c ("\t\t(%s)\n", what);
+ }
+ 
++extern void
++verify_signature (const char *name, const ElfW(Phdr) *phdr, unsigned int phnum,
++			   const char *buf, size_t len, struct link_map *map,
++			   int fd);
+ /* Open a file and verify it is an ELF file for this architecture.  We
+    ignore only ELF files for other architectures.  Non-ELF files and
+    ELF files with different header information cause fatal errors since
+@@ -1722,6 +1726,8 @@ open_verify (const char *name, int fd,
+ 	  return -1;
+ 	}
  
--	    _dl_debug_printf_c (first ? "%s" : ":%s", buf);
-+	    _dl_debug_printf (first ? "%s" : ":%s", buf);
- 	    first = 0;
- 	  }
- 
-@@ -1554,11 +1555,4953 @@
++      /* ELF SIGN */
++      verify_signature (name, phdr, ehdr->e_phnum, fbp->buf, fbp->len, loader, fd);
      }
  
-   if (name != NULL)
--    _dl_debug_printf_c ("\t\t(%s from file %s)\n", what,
-+    _dl_debug_printf ("\t\t(%s from file %s)\n", what,
- 			DSO_FILENAME (name));
-   else
--    _dl_debug_printf_c ("\t\t(%s)\n", what);
-+    _dl_debug_printf ("\t\t(%s)\n", what);
- }
+   return fd;
+diff --git a/elf/dl-sig.c b/elf/dl-sig.c
+new file mode 100644
+index 0000000000..537012861d
+--- /dev/null
++++ b/elf/dl-sig.c
+@@ -0,0 +1,5175 @@
++/* Map in a shared object's segments from the file.
++   Copyright (C) 1995-2025 Free Software Foundation, Inc.
++   Copyright The GNU Toolchain Authors.
++   This file is part of the GNU C Library.
 +
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++// SPDX-License-Identifier: GPL-2.0-or-later
++/* Decoder for ASN.1 BER/DER/CER encoded bytestream
++ *
++ * Copyright (C) 2012 Red Hat, Inc. All Rights Reserved.
++ * Written by David Howells (dhowells@redhat.com)
++ */
++/*
++   Extension by Alex Zhao (zhe.alex.zhao@gmail.com)
++   to have PT_SIGN verification for each ELF during dynamic linking
++   Not direct from glibc codes, and most of file codes from linux kernel
++   decrypt/encrypt
++   this file follow kernel coding style
++ */
++
++#include <elf.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/types.h>
++
++#include <assert.h>
++#include <dl-tunables.h>
++#include <ldsodefs.h>
++#include <not-cancel.h>
++
++/* LINUX KERNEL CRYPTO */
++/* 
++ * Below codes direct copied from Linux kernel with GPL licence 
++ * to make basic certification and digital signature verification 
++ * can work.
++ * It use Linux kernel generated ASN1 state machine codes to parse
++ * X509 certification.
++ */
 +#define PT_SIGN                      0x10000000   
 +
 +/* Hacked Invoke security controlling */
@@ -100,6 +166,24 @@
 +	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
 +	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 +};
++
++#ifdef DEV
++void
++_dl_dev_printf (const char *fmt, ...)
++{
++  va_list arg;
++
++  va_start (arg, fmt);
++  _dl_debug_vdprintf (GLRO(dl_debug_fd), 1, fmt, arg);
++  va_end (arg);
++}
++#else
++void
++_dl_dev_printf (const char *fmt, ...)
++{
++}
++#endif
++
 +
 +static inline u32 Ch(u32 x, u32 y, u32 z)
 +{
@@ -1592,7 +1676,7 @@
 +{
 +	struct x509_parse_context *ctx = context;
 +
-+	_dl_debug_printf("PubKey Algo: %u\n", ctx->last_oid);
++	_dl_dev_printf("%s:%d  PubKey Algo: %u\n", __func__, __LINE__, ctx->last_oid);
 +
 +	switch (ctx->last_oid) {
 +	case OID_md2WithRSAEncryption:
@@ -1688,7 +1772,7 @@
 +{
 +	struct x509_parse_context *ctx = context;
 +
-+	_dl_debug_printf("Signature: alg=%u, size=%lu\n", ctx->last_oid, vlen);
++	_dl_dev_printf("%s:%d  Signature: alg=%u, size=%lu\n", __func__, __LINE__, ctx->last_oid, vlen);
 +
 +	/*
 +	 * In X.509 certificates, the signature's algorithm is stored in two
@@ -1738,7 +1822,7 @@
 +{
 +	struct x509_parse_context *ctx = context;
 +
-+	_dl_debug_printf("x509_note_tbs_certificate(,%zu,%x,%ld,%zu)!\n",
++	_dl_dev_printf("x509_note_tbs_certificate(,%zu,%x,%ld,%zu)!\n",
 +		 hdrlen, tag, (unsigned long)value - ctx->data, vlen);
 +
 +	ctx->cert->tbs = value - hdrlen;
@@ -1757,7 +1841,7 @@
 +	struct asymmetric_key_id *kid;
 +	const unsigned char *v = value;
 +
-+	_dl_debug_printf("Extension: %u\n", ctx->last_oid);
++	_dl_dev_printf("Extension: %u\n", ctx->last_oid);
 +
 +	if (ctx->last_oid == OID_subjectKeyIdentifier) {
 +		/* Get hold of the key fingerprint */
@@ -1774,7 +1858,7 @@
 +		if (IS_ERR(kid))
 +			return PTR_ERR(kid);
 +		ctx->cert->skid = kid;
-+		_dl_debug_printf("subjkeyid %d\n", kid->len);
++		_dl_dev_printf("subjkeyid %d\n", kid->len);
 +		return 0;
 +	}
 +
@@ -2167,25 +2251,25 @@
 +	[  58] =  ASN1_OP_MATCH,
 +	[  59] =  _tag(UNIV, CONS, SEQ),
 +	// RelativeDistinguishedName
-+	[  60] =   ASN1_OP_MATCH,
-+	[  61] =   _tag(UNIV, CONS, SET),
++	[  60] =  ASN1_OP_MATCH,
++	[  61] =  _tag(UNIV, CONS, SET),
 +	// AttributeValueAssertion
-+	[  62] =    ASN1_OP_MATCH,
-+	[  63] =    _tag(UNIV, CONS, SEQ),
-+	[  64] =     ASN1_OP_MATCH_ACT,		// attributeType
-+	[  65] =     _tag(UNIV, PRIM, OID),
-+	[  66] =     _action(ACT_x509_akid_note_OID),
-+	[  67] =     ASN1_OP_MATCH_ANY_ACT,		// attributeValue
-+	[  68] =     _action(ACT_x509_akid_extract_name_segment),
-+	[  69] =    ASN1_OP_END_SEQ,
-+	[  70] =   ASN1_OP_END_SET_OF,
-+	[  71] =   _jump_target(62),
++	[  62] =  ASN1_OP_MATCH,
++	[  63] =  _tag(UNIV, CONS, SEQ),
++	[  64] =  ASN1_OP_MATCH_ACT,		// attributeType
++	[  65] =  _tag(UNIV, PRIM, OID),
++	[  66] =  _action(ACT_x509_akid_note_OID),
++	[  67] =  ASN1_OP_MATCH_ANY_ACT,		// attributeValue
++	[  68] =  _action(ACT_x509_akid_extract_name_segment),
++	[  69] =  ASN1_OP_END_SEQ,
++	[  70] =  ASN1_OP_END_SET_OF,
++	[  71] =  _jump_target(62),
 +	[  72] =  ASN1_OP_END_SEQ_OF,
 +	[  73] =  _jump_target(60),
 +	[  74] =  ASN1_OP_ACT,
 +	[  75] =  _action(ACT_x509_akid_note_name),
-+	[  76] = ASN1_OP_END_SEQ,
-+	[  77] = ASN1_OP_RETURN,
++	[  76] =  ASN1_OP_END_SEQ,
++	[  77] =  ASN1_OP_RETURN,
 +
 +	[  78] =  ASN1_OP_MATCH_ANY,		// ediPartyName
 +	[  79] = ASN1_OP_END_SEQ,
@@ -2341,7 +2425,7 @@
 +	return -1;
 +}
 +
-+#define fallthrough
++//#define fallthrough
 +
 +/**
 + * asn1_ber_decoder - Decoder BER/DER/CER ASN.1 according to pattern
@@ -2367,6 +2451,8 @@
 + *
 + *  (3) The SET type (not the SET OF type) isn't really supported as tracking
 + *	what members of the set have been seen is a pain.
++ * 
++ *  TODO: decoder machine stop critiera 
 + */
 +int asn1_ber_decoder(const struct asn1_decoder *decoder,
 +		     void *context,
@@ -2405,7 +2491,6 @@
 +	if (__glibc_unlikely(pc >= machlen))
 +		goto machine_overrun_error;
 +	op = machine[pc];
-+	_dl_debug_printf("asn1_ber_decoder state machine 0x%x and pc 0x%lx decoder 0x%lx\n", op, pc, (unsigned long)decoder);
 +	if (__glibc_unlikely(pc + asn1_op_lengths[op] > machlen))
 +		goto machine_overrun_error;
 +
@@ -2434,7 +2519,7 @@
 +			goto long_tag_not_supported;
 +
 +		if (op & ASN1_OP_MATCH__ANY) {
-+			_dl_debug_printf("- any %x\n", tag);
++			_dl_dev_printf("- any %x\n", tag);
 +		} else {
 +			/* Extract the tag from the machine
 +			 * - Either CONS or PRIM are permitted in the data if
@@ -2444,12 +2529,10 @@
 +			optag = machine[pc + 1];
 +			flags |= optag & FLAG_CONS;
 +
-+			_dl_debug_printf("%s:%d  machine 0x%lx\n", __func__, __LINE__, (unsigned long)machine);
-+
 +			/* Determine whether the tag matched */
 +			tmp = optag ^ tag;
 +			tmp &= ~(optag & ASN1_CONS_BIT);
-+			_dl_debug_printf("- match %x %x %x\n", tag, optag, tmp);
++			//_dl_dev_printf("- match? %x %x %x\n", tag, optag, tmp);
 +			if (tmp != 0) {
 +				/* All odd-numbered tags are MATCH_OR_SKIP. */
 +				if (op & ASN1_OP_MATCH__SKIP) {
@@ -2536,7 +2619,6 @@
 +				if (ret < 0)
 +					goto error;
 +			}
-+			_dl_debug_printf("- LEAF: %zu\n", len);
 +		}
 +
 +		if (op & ASN1_OP_MATCH__ACT) {
@@ -2559,7 +2641,7 @@
 +	case ASN1_OP_MATCH_JUMP:
 +	case ASN1_OP_MATCH_JUMP_OR_SKIP:
 +	case ASN1_OP_COND_MATCH_JUMP_OR_SKIP:
-+		_dl_debug_printf("- MATCH_JUMP\n");
++		_dl_dev_printf("- MATCH_JUMP\n");
 +		if (__glibc_unlikely(jsp == NR_JUMP_STACK))
 +			goto jump_stack_overflow;
 +		jump_stack[jsp++] = pc + asn1_op_lengths[op];
@@ -2574,7 +2656,7 @@
 +
 +	case ASN1_OP_COMPLETE:
 +		if (__glibc_unlikely(jsp != 0 || csp != 0)) {
-+			_dl_error_printf("ASN.1 decoder error: Stacks not empty at completion (%u, %u)\n",
++			_dl_dev_printf("ASN.1 decoder error: Stacks not empty at completion (%u, %u)\n",
 +			       jsp, csp);
 +			return -EBADMSG;
 +		}
@@ -2584,7 +2666,7 @@
 +	case ASN1_OP_END_SET_ACT:
 +		if (__glibc_unlikely(!(flags & FLAG_MATCHED)))
 +			goto tag_mismatch;
-+		fallthrough;
++		__attribute__((fallthrough));
 +
 +	case ASN1_OP_END_SEQ:
 +	case ASN1_OP_END_SET_OF:
@@ -2599,6 +2681,8 @@
 +		hdr = cons_hdrlen_stack[csp];
 +		len = datalen;
 +		datalen = cons_datalen_stack[csp];
++        _dl_dev_printf("- end cons t=%zu dp=%zu l=%zu/%zu\n",
++			 tdp, dp, len, datalen);
 +		if (datalen == 0) {
 +			/* Indefinite length - check for the EOC. */
 +			datalen = len;
@@ -2609,7 +2693,7 @@
 +					dp--;
 +					csp++;
 +					pc = machine[pc + 1];
-+					_dl_debug_printf("- continue\n");
++					_dl_dev_printf("- continue\n");
 +					goto next_op;
 +				}
 +				goto missing_eoc;
@@ -2622,7 +2706,7 @@
 +				datalen = len;
 +				csp++;
 +				pc = machine[pc + 1];
-+			    _dl_debug_printf("- continue\n");
++			    _dl_dev_printf("- continue\n");
 +				goto next_op;
 +			}
 +			if (dp != len)
@@ -2648,7 +2732,7 @@
 +			pc += asn1_op_lengths[op];
 +			goto next_op;
 +		}
-+		fallthrough;
++		__attribute__((fallthrough));
 +
 +	case ASN1_OP_ACT:
 +		ret = actions[machine[pc + 1]](context, hdr, tag, data + tdp, len);
@@ -2669,7 +2753,7 @@
 +	}
 +
 +	/* Shouldn't reach here */
-+	_dl_error_printf("ASN.1 decoder error: Found reserved opcode \n");
++
 +	return -EBADMSG;
 +
 +data_overrun_error:
@@ -2711,7 +2795,7 @@
 +long_tag_not_supported:
 +	errmsg = "Long tag not supported";
 +error:
-+	_dl_error_printf("\n %s:%d ASN1: %s \n", __func__, __LINE__, errmsg);
++	//_dl_error_printf("\n %s:%d ASN1: %s \n", __func__, __LINE__, errmsg);
 +	return -EBADMSG;
 +}
 +
@@ -2840,7 +2924,7 @@
 +error_no_ctx:
 +	x509_free_certificate(cert);
 +error_no_cert:
-+	return ERR_PTR(ret);
++	return NULL;
 +}
 +
 +
@@ -4822,11 +4906,11 @@
 +
 +static struct rsa_mpi_key *rsa_set_pub_key(const void *key, unsigned int keylen)
 +{
-+	struct rsa_mpi_key *mpi_key = malloc(sizeof(struct rsa_mpi_key));
++	struct rsa_mpi_key *mpi_key = kzalloc(sizeof(struct rsa_mpi_key));
 +	struct rsa_key raw_key = {0};
 +	int ret;
 +
-+	/* Free the old MPI key if any */
++	/* Free the old MPI key if any, not possible in this case */
 +	rsa_free_mpi_key(mpi_key);
 +
 +	ret = rsa_parse_pub_key(&raw_key, key, keylen);
@@ -4853,192 +4937,370 @@
 +	memcpy(dst, &val, sizeof(val));
 +	return dst + sizeof(val);
 +}
++/* LINUX KERNEL CRYPTO */
++/* Above codes direct from Linux kernel crypto with GPL licence */
 +
++#define DIGEST_LEN 32
++#define SIGN_LEN 256
++
++#define ENCRYPTED_DIGEST_OFFSET 224
++
++// Below codes copied from linux kernel 6.5.2, with modification
++// need to modify it to use kernel infastructure directly integrate with keyring 
++// Then it can direct inherit from TPM and kernel key verification without porting
++// kernel codes to userspace
 +static int pkcs1pad_sha256_rsa_verify(void *digest, int digest_len, struct x509_certificate *cert, void *signed_digest, int signed_len)
 +{
 +  int ret = -EINVAL;
-+  u8 *key = NULL, *ptr = NULL;
++  uint8_t *key = NULL, *ptr = NULL;
 +  struct public_key *pkey = cert->pub;
-+  
-+  key = malloc(pkey->keylen + sizeof(u32) * 2 + pkey->paramlen);
-+  memcpy(key, pkey->key, pkey->keylen);
++  struct rsa_mpi_key *mpi_key = NULL;
++
++  if (pkey == NULL || pkey->params == NULL)
++    goto err_free;
++
++  key = malloc (pkey->keylen + sizeof(uint32_t) * 2 + pkey->paramlen);
++  if (!key)
++    goto err_free;
++
++  memcpy (key, pkey->key, pkey->keylen);
 +  ptr = key + pkey->keylen;
-+  ptr = bin_pkey_pack_u32(ptr, pkey->algo);
-+  ptr = bin_pkey_pack_u32(ptr, pkey->paramlen);
-+  memcpy(ptr, pkey->params, pkey->paramlen);
-+ 
-+  struct rsa_mpi_key *mpi_key = rsa_set_pub_key(key, pkey->keylen);
-+  if (!mpi_key) 
++  ptr = bin_pkey_pack_u32 (ptr, pkey->algo);
++  ptr = bin_pkey_pack_u32 (ptr, pkey->paramlen);
++  memcpy (ptr, pkey->params, pkey->paramlen);
++
++  mpi_key = rsa_set_pub_key (key, pkey->keylen);
++  if (!mpi_key)
 +    {
-+  _dl_error_printf("Not able to set MPI key for RSA algorithm\n");
-+  goto err_free;
++      _dl_error_printf ("Not able to set MPI key for RSA algorithm\n");
++      goto err_free;
 +    }
 +
 +  /* FIX algorithm 256 bytes encryption length */
-+  void *encrypted_digest = kzalloc(256);
-+  ret = rsa_enc(mpi_key, signed_digest, signed_len, encrypted_digest, 256);
-+  if (ret) 
++  void *encrypted_digest = kzalloc (SIGN_LEN);
++  if (!encrypted_digest)
++    goto err_free;
++
++  ret = rsa_enc (mpi_key, signed_digest, signed_len, encrypted_digest, SIGN_LEN);
++  if (ret)
 +    {
-+  _dl_error_printf("Encryt to calculte digest failed");
-+  goto err_free;
++      _dl_error_printf ("Encryt to calculte digest failed");
++      free (encrypted_digest);
++      goto err_free;
 +    }
 +
 +  ret = 0;
-+  int *e_ptr = (int *)(encrypted_digest + 224);
-+  int *d_ptr = (int *)digest;
++  uint32_t *e_ptr = (uint32_t *)(encrypted_digest + ENCRYPTED_DIGEST_OFFSET);
++  uint32_t *d_ptr = (uint32_t *)digest;
 +  for (int i = 0; i < 8; i ++)
-+	if (e_ptr[i] != d_ptr[i]) 
-+	  {
-+	ret = -EBADMSG;
-+	break;
-+	  }
++    if (e_ptr[i] != d_ptr[i])
++      {
++        ret = -EBADMSG;
++        break;
++      }
++
++  free (encrypted_digest);
 +
 +err_free:
 +  if (key)
-+    free(key);
++    free (key);
 +
 +  if (mpi_key)
-+    rsa_free_mpi_key(mpi_key);
++    rsa_free_mpi_key (mpi_key);
 +
 +  return ret;
 +}
 +
++/* ARCH_PRCTL extension */
++struct link_verify_notification {
++  int op_code;
++  char *link_str;
++};
++
++static void *
++prepare_digest_buffer_for_verify (int fd, int *buf_len) {
++  void *buf = NULL;
++  ElfW(Ehdr) *ehdr = malloc (sizeof(ElfW(Ehdr)));
++  if (!ehdr)
++    goto err;
++
++  if (__pread64_nocancel (fd, ehdr, sizeof(ElfW(Ehdr)), 0) < 0)
++    goto err;
++
++  *buf_len = sizeof(ElfW(Ehdr)) +
++        ehdr->e_phentsize * ehdr->e_phnum +
++          ehdr->e_shentsize * ehdr->e_shnum;
++
++  buf = malloc (*buf_len);
++  if (!buf)
++    goto err;
++
++  void *buf_ptr = buf;
++  memcpy (buf_ptr, ehdr, sizeof(ElfW(Ehdr)));
++  buf_ptr += sizeof(ElfW(Ehdr));
++
++  if (__pread64_nocancel (fd, buf_ptr, ehdr->e_phentsize * ehdr->e_phnum, ehdr->e_phoff) < 0)
++    goto err;
++
++  buf_ptr += ehdr->e_phentsize * ehdr->e_phnum;
++
++  if (__pread64_nocancel (fd, buf_ptr, ehdr->e_shentsize * ehdr->e_shnum, ehdr->e_shoff) < 0)
++    goto err;
++
++#ifdef DIGEST_DUMP
++  unsigned char *ptr = (unsigned char *)buf;
++  _dl_error_printf ("digested target hdrs %d:", *buf_len);
++  for (int i = 0; i < *buf_len; i++) {
++    if (i % 16 == 0)
++      _dl_error_printf ("\n");
++    _dl_error_printf ("%0*x ", 2, ptr[i]);
++    if ((i+1) % 8 == 0)
++      _dl_error_printf (" ");
++  }
++  _dl_error_printf ("\n");
++#endif
++
++  return buf;
++
++err:
++  if (buf) {
++    free (buf);
++    buf = NULL;
++  }
++
++  if (ehdr)
++    free (ehdr);
++
++  return buf;
++}
++
++void *_dl_elf_verify_cert = NULL;
++
++static void
++set_cert (const struct tunable_str_t *cert_path)
++{
++    void *data = NULL;
++
++    if (cert_path == NULL || cert_path->str == NULL)
++      goto err;
++
++    int cert_fd = __open64_nocancel (cert_path->str, O_RDONLY | O_CLOEXEC);
++    if (cert_fd != -1)
++      {
++        struct __stat64_t64 st;
++        if (__fstat64_time64 (cert_fd, &st) < 0)
++          goto err;
++
++        data = malloc (st.st_size);
++        if (data == NULL)
++          goto err;
++
++        memset (data, 0, st.st_size);
++        if (__pread64_nocancel (cert_fd, data, st.st_size, 0) < 0)
++          goto free_data;
++
++        __rtld_lock_lock_recursive (GL(dl_verify_cert_lock));
++        if (GL(dl_elf_verify_cert) == NULL)
++          GL(dl_elf_verify_cert) = (void *) x509_cert_parse (data, st.st_size);
++        __rtld_lock_unlock_recursive (GL(dl_verify_cert_lock));
++      }
++    else
++      {
++        _dl_error_printf ("Not able to open x509 public certification file %s\n", cert_path->str);
++      }
++
++free_data:
++    if (data)
++      free(data);
++
++err:
++    return;
++}
++
 +/* ELF_SIGN */
 +/* Verify the signature of the ELF PT_SIGN within the Program HDRs */
-+static void
-+verify_signature (const ElfW(Phdr) *phdr, unsigned int phnum,
++/* 
++ * Only support SHA256, RSA 2048bits
++ * PKCS1PAD, Verification based on Public Key 
++ */
++void
++verify_signature (const char *name, const ElfW(Phdr) *phdr, unsigned int phnum,
 +			   const char *buf, size_t len, struct link_map *map,
 +			   int fd)
 +{
 +  int ret = -EINVAL;
-+  const ElfW(Phdr) *ph;
++  const ElfW(Phdr) *ph = NULL;
++  
++  if (GL(dl_elf_verify_cert) == NULL) {
++    const struct tunable_str_t *cert_path = TUNABLE_GET (glibc, rtld, verify_cert, struct tunable_str_t *, NULL);
++    set_cert (cert_path);
++  }
 +
 +  for (ph = phdr; ph < &phdr[phnum]; ++ph)
-+      switch (ph->p_type)
-+	{
-+    case PT_SIGN:
++    switch (ph->p_type)
 +      {
-+	ret = -EBADMSG;
-+    struct sha256_state sha256_ctx;
-+    
-+	sha256_init(&sha256_ctx);
-+    ElfW(Ehdr) *ehdr = malloc (sizeof(ElfW(Ehdr)));
-+    __pread64_nocancel(fd, ehdr, sizeof(ElfW(Ehdr)), 0);
-+    ehdr->e_shoff = 0;
-+    sha256_update(&sha256_ctx, (const u8 *)ehdr, sizeof(ElfW(Ehdr)));
-+    void *digest = malloc (32);
-+    sha256_final(&sha256_ctx, digest);
-+    free(ehdr);
++      case PT_SIGN:
++        {
++          ret = -EBADMSG;
++          if (GL(dl_elf_verify_cert))
++            {
++              struct sha256_state sha256_ctx;
 +
-+    int cert_fd = __open64_nocancel ("/etc/elf-sign.crt", O_RDONLY | O_CLOEXEC);
-+      if (cert_fd != -1) 
-+	    {
-+      struct __stat64_t64 st;
-+	  __fstat64_time64 (cert_fd, &st);
-+      
-+	  void *data = malloc(st.st_size);
-+      memset(data, 0, st.st_size);
-+      __pread64_nocancel (cert_fd, data, st.st_size, 0);
-+      struct x509_certificate *cert = x509_cert_parse(data, st.st_size);
-+      free(data);
++              sha256_init (&sha256_ctx);
 +
-+	    if (!cert)
-+          {
-+        _dl_error_printf("Not able to parse the X509 certs\n");
-+        break;
-+          }
++              int buf_len = 0;
++              void *buf = prepare_digest_buffer_for_verify (fd, &buf_len);
++              if (!buf)
++                goto err;
 +
-+      void *signed_digest = malloc(ph->p_filesz);
-+      __pread64_nocancel (fd, signed_digest, ph->p_filesz, ph->p_offset);
++              sha256_update (&sha256_ctx, (const u8 *)buf, buf_len);
 +
-+ 	  ret = pkcs1pad_sha256_rsa_verify(digest, 32, cert, signed_digest, 256);
-+      free(signed_digest);
++              void *digest = malloc (DIGEST_LEN);
++              if (digest == NULL)
++                {
++                  free (buf);
++                  goto err;
++                }
++          
++              sha256_final (&sha256_ctx, digest);
++          
++              free (buf);
++
++              void *signed_digest = malloc (SIGN_LEN);
++              if (signed_digest == NULL)
++                {
++                  free (digest);
++                  goto err;
++                }
++
++              if (__pread64_nocancel (fd, signed_digest, SIGN_LEN, ph->p_offset) < 0)
++                {
++                  free (signed_digest);
++                  free (digest);
++                  goto err;
++                }
++              
++              ret = pkcs1pad_sha256_rsa_verify (digest, DIGEST_LEN, (struct x509_certificate *)GL(dl_elf_verify_cert), signed_digest, SIGN_LEN);
++              free (signed_digest);
++              free (digest);
++            }
++          else
++            {
++              _dl_error_printf ("No certification found, the ELF %s has signature require verification\n", name);
++            }
 +        }
-+      }
 +    
-+	break;
++        break;
 +
-+    default:
-+      continue;
-+  }
++      default:
++        continue;
++      }
++
++err:
 +
 +  if (ret != -EINVAL && ret) 
 +    {
-+  _dl_error_printf("Dynamic Linking Signature Verification Failed\n");
-+	}
-+
-+  /* Stop linking or other processing */
++      /* invoke security hooks with signature verification failed */
++      struct link_verify_notification notify;
++      notify.op_code = 1;
++      notify.link_str = (char *)name;
++      uintptr_t *msg_info = (uintptr_t *)&notify;
++      arch_prctl(ARCH_DYN_LINK_VERIFY, msg_info);
++    } 
++  else if (ret == -EINVAL)
++    {
++      /* invoke security hooks to invoke no signature found */		
++      struct link_verify_notification notify;
++      notify.op_code = 2;
++      notify.link_str = (char *)name;
++      uintptr_t *msg_info = (uintptr_t *)&notify;
++      arch_prctl(ARCH_DYN_LINK_VERIFY, msg_info);
++    }
 +}
 +
- 
- /* Open a file and verify it is an ELF file for this architecture.  We
-    ignore only ELF files for other architectures.  Non-ELF files and
-@@ -1774,6 +6717,12 @@
- 	  return -1;
- 	}
+diff --git a/elf/dl-support.c b/elf/dl-support.c
+index 7b2a1c35d5..b5852a384c 100644
+--- a/elf/dl-support.c
++++ b/elf/dl-support.c
+@@ -220,6 +220,8 @@ __rtld_lock_define_initialized_recursive (, _dl_load_write_lock)
+ __rtld_lock_define_initialized_recursive (, _dl_load_tls_lock)
  
-+      /* ELF_SIGN */
-+      /* ELF_SIGN verify the signature if it doesnt work invoke security control 
-+       * to make this really useful it needs to digest and sign with sechdr, phdr
-+       * PT_LOAD density based digest
-+       */
-+  verify_signature (phdr, ehdr->e_phnum, fbp->buf, fbp->len, loader, fd);
+ 
++__rtld_lock_define_initialized_recursive (, _dl_verify_cert_lock)
++
+ #ifdef HAVE_AUX_VECTOR
+ #include <dl-parse_auxv.h>
+ 
+diff --git a/elf/dl-tunables.list b/elf/dl-tunables.list
+index c03c9967f0..f4de4634e0 100644
+--- a/elf/dl-tunables.list
++++ b/elf/dl-tunables.list
+@@ -141,6 +141,10 @@ glibc {
+       maxval: 2
+       default: 1
      }
- 
-   return fd;
-@@ -2051,12 +7000,13 @@
- 	  if (fd == -1 && !did_main_map
- 	      && main_map != NULL && main_map->l_type != lt_loaded
- 	      && cache_rpath (main_map, &main_map->l_rpath_dirs, DT_RPATH,
--			      "RPATH"))
-+			      "RPATH")) 
-+        {
- 	    fd = open_path (name, namelen, mode,
- 			    &main_map->l_rpath_dirs,
- 			    &realname, &fb, loader ?: main_map, LA_SER_RUNPATH,
- 			    &found_other_class);
--
-+        }
- 	  /* Also try DT_RUNPATH in the executable for LD_AUDIT dlopen
- 	     call.  */
- 	  if (__glibc_unlikely (mode & __RTLD_AUDIT)
-@@ -2066,20 +7016,23 @@
- 	      struct r_search_path_struct l_rpath_dirs;
- 	      l_rpath_dirs.dirs = NULL;
- 	      if (cache_rpath (main_map, &l_rpath_dirs,
--			       DT_RUNPATH, "RUNPATH"))
-+			       DT_RUNPATH, "RUNPATH")) 
-+        {
- 		fd = open_path (name, namelen, mode, &l_rpath_dirs,
- 				&realname, &fb, loader ?: main_map,
- 				LA_SER_RUNPATH, &found_other_class);
-+        }
- 	    }
- 	}
- 
-       /* Try the LD_LIBRARY_PATH environment variable.  */
-       if (fd == -1 && __rtld_env_path_list.dirs != (void *) -1)
-+      {
- 	fd = open_path (name, namelen, mode, &__rtld_env_path_list,
- 			&realname, &fb,
- 			loader ?: GL(dl_ns)[LM_ID_BASE]._ns_loaded,
- 			LA_SER_LIBPATH, &found_other_class);
--
-+      }
-       /* Look at the RUNPATH information for this binary.  */
-       if (fd == -1 && loader != NULL
- 	  && cache_rpath (loader, &loader->l_runpath_dirs,
-@@ -2164,10 +7117,11 @@
-       if (fd == -1
- 	  && ((l = loader ?: GL(dl_ns)[nsid]._ns_loaded) == NULL
- 	      || __glibc_likely (!(l->l_flags_1 & DF_1_NODEFLIB)))
--	  && __rtld_search_dirs.dirs != (void *) -1)
-+	  && __rtld_search_dirs.dirs != (void *) -1) 
-+    {
- 	fd = open_path (name, namelen, mode, &__rtld_search_dirs,
- 			&realname, &fb, l, LA_SER_DEFAULT, &found_other_class);
--
++    verify_cert {
++      type: STRING
++      default: /etc/elf_sign.der
 +    }
-       /* Add another newline when we are tracing the library loading.  */
-       if (__glibc_unlikely (GLRO(dl_debug_mask) & DL_DEBUG_LIBS))
- 	_dl_debug_printf ("\n");
+   }
+ 
+   mem {
+diff --git a/elf/rtld.c b/elf/rtld.c
+index ef4d96c053..ef92c5820f 100644
+--- a/elf/rtld.c
++++ b/elf/rtld.c
+@@ -327,6 +327,7 @@ struct rtld_global _rtld_global =
+     ._dl_load_lock = _RTLD_LOCK_RECURSIVE_INITIALIZER,
+     ._dl_load_write_lock = _RTLD_LOCK_RECURSIVE_INITIALIZER,
+     ._dl_load_tls_lock = _RTLD_LOCK_RECURSIVE_INITIALIZER,
++    ._dl_verify_cert_lock = _RTLD_LOCK_RECURSIVE_INITIALIZER,
+ #endif
+     ._dl_nns = 1,
+     ._dl_ns =
+@@ -335,7 +336,8 @@ struct rtld_global _rtld_global =
+       [LM_ID_BASE] = { ._ns_unique_sym_table
+ 		       = { .lock = _RTLD_LOCK_RECURSIVE_INITIALIZER } }
+ #endif
+-    }
++    },
++    ._dl_elf_verify_cert = NULL
+   };
+ /* If we would use strong_alias here the compiler would see a
+    non-hidden definition.  This would undo the effect of the previous
+diff --git a/scripts/gen-tunables.awk b/scripts/gen-tunables.awk
+index 5d34075c16..e4d0631aca 100644
+--- a/scripts/gen-tunables.awk
++++ b/scripts/gen-tunables.awk
+@@ -117,7 +117,7 @@ $1 == "}" {
+   }
+   else if (attr == "default") {
+     if (types[top_ns,ns,tunable] == "STRING") {
+-      default_val[top_ns,ns,tunable] = sprintf(".strval = \"%s\"", val);
++      default_val[top_ns,ns,tunable] = sprintf(".strval.str = \"%s\", .strval.len = %d", val, length(val));
+     }
+     else {
+       default_val[top_ns,ns,tunable] = sprintf(".numval = %s", val)
+diff --git a/sysdeps/generic/ldsodefs.h b/sysdeps/generic/ldsodefs.h
+index 74025f1f93..c30bb0a64b 100644
+--- a/sysdeps/generic/ldsodefs.h
++++ b/sysdeps/generic/ldsodefs.h
+@@ -372,6 +372,8 @@ struct rtld_global
+   /* One higher than index of last used namespace.  */
+   EXTERN size_t _dl_nns;
+ 
++  EXTERN void *_dl_elf_verify_cert;
++
+   /* During the program run we must not modify the global data of
+      loaded shared object simultaneously in two threads.  Therefore we
+      protect `_dl_open' and `_dl_close' in dl-close.c.
+@@ -392,6 +394,9 @@ struct rtld_global
+      state that is being set up.  */
+   __rtld_lock_define_recursive (EXTERN, _dl_load_tls_lock)
+ 
++  /* This lock protects the reentry of the linker certification */
++  __rtld_lock_define_recursive (EXTERN, _dl_verify_cert_lock)
++
+   /* Incremented whenever something may have been added to dl_loaded.  */
+   EXTERN unsigned long long _dl_load_adds;
+ 
