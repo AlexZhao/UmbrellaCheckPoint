@@ -39,10 +39,10 @@ index 00b9da9ec7..28a928edf4 100644
    return fd;
 diff --git a/elf/dl-sig.c b/elf/dl-sig.c
 new file mode 100644
-index 0000000000..537012861d
+index 0000000000..7b1deb5155
 --- /dev/null
 +++ b/elf/dl-sig.c
-@@ -0,0 +1,5175 @@
+@@ -0,0 +1,5181 @@
 +/* Map in a shared object's segments from the file.
 +   Copyright (C) 1995-2025 Free Software Foundation, Inc.
 +   Copyright The GNU Toolchain Authors.
@@ -5190,7 +5190,7 @@ index 0000000000..537012861d
 +            }
 +        }
 +    
-+        break;
++        goto err;
 +
 +      default:
 +        continue;
@@ -5205,7 +5205,10 @@ index 0000000000..537012861d
 +      notify.op_code = 1;
 +      notify.link_str = (char *)name;
 +      uintptr_t *msg_info = (uintptr_t *)&notify;
-+      arch_prctl(ARCH_DYN_LINK_VERIFY, msg_info);
++      if (arch_prctl(ARCH_DYN_LINK_VERIFY, msg_info) < 0)
++		{
++		  _dl_error_printf("signature verification failed invoke security hooks with signature verification failed for lib %s\n", name);
++		}
 +    } 
 +  else if (ret == -EINVAL)
 +    {
@@ -5214,7 +5217,10 @@ index 0000000000..537012861d
 +      notify.op_code = 2;
 +      notify.link_str = (char *)name;
 +      uintptr_t *msg_info = (uintptr_t *)&notify;
-+      arch_prctl(ARCH_DYN_LINK_VERIFY, msg_info);
++      if (arch_prctl(ARCH_DYN_LINK_VERIFY, msg_info) < 0)
++	    {
++		  _dl_error_printf("no signature found invoke security hooks with no signature found for lib %s\n", name);
++	    }
 +    }
 +}
 +
