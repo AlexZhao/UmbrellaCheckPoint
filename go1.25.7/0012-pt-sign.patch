@@ -1,0 +1,107 @@
+Upstream-Status: Pending [zhe.alex.zhao@gmail.com]
+Signed-off-by: Alex Zhao [zhe.alex.zhao@gmail.com]
+---
+diff --git a/src/cmd/link/internal/ld/elf.go b/src/cmd/link/internal/ld/elf.go
+index 6ff1d94..d8cabb2 100644
+--- a/src/cmd/link/internal/ld/elf.go
++++ b/src/cmd/link/internal/ld/elf.go
+@@ -632,6 +632,15 @@ func elfWriteMipsAbiFlags(ctxt *Link) int {
+ 	return int(sh.Size)
+ }
+ 
++func elfwriteptsign(ctxt *Link) int {
++	sh := elfshname(".signature")
++	ctxt.Out.SeekSet(int64(sh.Off))
++	for i := 0; i < 256; i++ {
++		ctxt.Out.Write8(0)
++	}
++	return int(sh.Size)
++}
++
+ func elfnote(sh *ElfShdr, startva uint64, resoff uint64, sizes ...int) int {
+ 	n := resoff % 4
+ 	// if section contains multiple notes (as is the case with FreeBSD signature),
+@@ -863,6 +872,20 @@ const (
+ 
+ var ELF_NOTE_BUILDINFO_NAME = []byte("GNU\x00")
+ 
++func ptsign(sh *ElfShdr, startva uint64, resoff uint64) int {
++	n := resoff % 4
++	n += 256 // Signature length is 256 bytes
++
++	sh.Type = uint32(elf.SHT_PROGBITS)
++	sh.Flags = uint64(elf.SHF_ALLOC)
++	sh.Addralign = 4
++	sh.Addr = startva + resoff - n
++	sh.Off = resoff - n
++	sh.Size = n - resoff%4
++
++	return int(n)
++}
++
+ func elfbuildinfo(sh *ElfShdr, startva uint64, resoff uint64) int {
+ 	n := int(ELF_NOTE_BUILDINFO_NAMESZ + Rnd(int64(len(buildinfo)), 4))
+ 	return elfnote(sh, startva, resoff, n)
+@@ -1438,6 +1461,9 @@ func (ctxt *Link) doelf() {
+ 	shstrtabAddstring(".go.fuzzcntrs")
+ 	shstrtabAddstring(".go.buildinfo")
+ 	shstrtabAddstring(".go.fipsinfo")
++	if ctxt.LinkMode != LinkExternal {
++		shstrtabAddstring(".signature")
++	}
+ 	if ctxt.IsMIPS() {
+ 		shstrtabAddstring(".MIPS.abiflags")
+ 		shstrtabAddstring(".gnu.attributes")
+@@ -2012,6 +2038,20 @@ func asmbElf(ctxt *Link) {
+ 		phsh(getpnote(), sh)
+ 	}
+ 
++	/*
++	 * Generate .signature for the PT SIGN program header
++	 * reserve elf section with alignment
++	 * link program header to section header
++	 */
++	if ctxt.LinkMode != LinkExternal {
++		sh := elfshname(".signature")
++		resoff -= int64(ptsign(sh, uint64(startva), uint64(resoff)))
++		//shsym(sh, ldr, ldr.Lookup(".signature", 0))
++		ph := newElfPhdr()
++		ph.Type = elf.PT_SIGN
++		ph.Flags = elf.PF_R
++		phsh(ph, sh)
++	}
+ 	// Additions to the reserved area must be above this line.
+ 
+ 	elfphload(&Segtext)
+@@ -2387,6 +2427,10 @@ elfobj:
+ 		a += int64(elfwritenetbsdpax(ctxt.Out))
+ 	}
+ 
++	if ctxt.LinkMode != LinkExternal {
++		a += int64(elfwriteptsign(ctxt))
++	}
++
+ 	if a > elfreserve {
+ 		Errorf("ELFRESERVE too small: %d > %d with %d text sections", a, elfreserve, numtext)
+ 	}
+diff --git a/src/debug/elf/elf.go b/src/debug/elf/elf.go
+index 58e37da..8a8aba3 100644
+--- a/src/debug/elf/elf.go
++++ b/src/debug/elf/elf.go
+@@ -763,6 +763,8 @@ const (
+ 	PT_PHDR    ProgType = 6 /* Location of program header itself. */
+ 	PT_TLS     ProgType = 7 /* Thread local storage segment */
+ 
++	PT_SIGN ProgType = 0x10000000 /* Signature of the ELF format. */
++
+ 	PT_LOOS ProgType = 0x60000000 /* First OS-specific. */
+ 
+ 	PT_GNU_EH_FRAME ProgType = 0x6474e550 /* Frame unwind information */
+@@ -813,6 +815,7 @@ var ptStrings = []intName{
+ 	{5, "PT_SHLIB"},
+ 	{6, "PT_PHDR"},
+ 	{7, "PT_TLS"},
++	{0x10000000, "PT_SIGN"},
+ 	{0x60000000, "PT_LOOS"},
+ 	{0x6474e550, "PT_GNU_EH_FRAME"},
+ 	{0x6474e551, "PT_GNU_STACK"},
