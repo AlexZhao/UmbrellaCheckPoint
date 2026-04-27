@@ -1,4 +1,7 @@
 # UmbrellaCheckPoint
+
+English | [简体中文](README-CN.md) 
+
 Different patches and hacks across binutils/glibc/linux kernel 
 
 binutils sign compiled ELF with PT_SIGN program hdr
@@ -25,4 +28,8 @@ elf_sign_effect:
 3 leave the signature process to securty hook 
 
 
+# Generate signature
+1. openssl genrsa -out sign_key.key 2048                                    # Generate RSA private key     
+2. openssl req -new -x509v1 -days 4096 -key sign_key.key -out elf_sign.crt  # use x509v1 format of certification with DER encoded    
+3. openssl x509 -in elf_sign.crt -outform der -out elf_sign.der             # convert public key to DER format     
 
