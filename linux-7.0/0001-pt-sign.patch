@@ -15,21 +15,23 @@ index 384e2cc6a..9a98d0963 100644
  #define ARCH_SHSTK_SHSTK		(1ULL <<  0)
  #define ARCH_SHSTK_WRSS			(1ULL <<  1)
 diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
-index 4c718f8ad..c08b8863e 100644
+index 4c718f8ad..846538397 100644
 --- a/arch/x86/kernel/process.c
 +++ b/arch/x86/kernel/process.c
-@@ -1060,6 +1060,61 @@ unsigned long __get_wchan(struct task_struct *p)
+@@ -1060,6 +1060,75 @@ unsigned long __get_wchan(struct task_struct *p)
  	return addr;
  }
  
 +#ifdef CONFIG_ELF_SIGN
 +
-+#define MAXIMUM_ARCH_STR_LEN  256
++#define MAXIMUM_ARCH_STR_LEN  1024
 +
 +struct link_verify_notification {
 +	int op_code;
 +	char *link_str;
 +};
++
++extern unsigned long elf_sign_effect;
 +
 +/* Notification of the Dynamic Linking Procedure When failed invoke this */
 +static int arch_link_verify(unsigned long arg) {
@@ -55,14 +57,26 @@ index 4c718f8ad..c08b8863e 100644
 +		goto err;
 +	}
 +
-+	ret = security_arch_link_elf_sign(notify.op_code, link_str);
-+	if (ret)
-+		goto err;
-+    else
-+		if (notify.op_code == 1)
-+			pr_err("dynamic linking signature verification failed   -- > %s\n", link_str);
-+		else
-+			pr_err("dynamic linking not have signature -- > %s\n", link_str);
++	if (notify.op_code == 1)
++		pr_debug("dynamic linking signature verification failed   -- > %s\n", link_str);
++	else
++		pr_debug("dynamic linking not have signature -- > %s\n", link_str);
++
++	switch (elf_sign_effect) {
++		case 0:
++		case 1:
++			ret = 0;
++			break;
++		case 2:
++			ret = -EPERM;
++			break;
++		case 3:
++			ret = security_arch_link_elf_sign(notify.op_code, link_str);
++			break;
++		default:
++			ret = -EINVAL;
++			break;
++	}
 +
 +err:
 +	if (link_str)
@@ -80,7 +94,7 @@ index 4c718f8ad..c08b8863e 100644
  SYSCALL_DEFINE2(arch_prctl, int, option, unsigned long, arg2)
  {
  	switch (option) {
-@@ -1073,6 +1128,10 @@ SYSCALL_DEFINE2(arch_prctl, int, option, unsigned long, arg2)
+@@ -1073,6 +1142,10 @@ SYSCALL_DEFINE2(arch_prctl, int, option, unsigned long, arg2)
  	case ARCH_GET_XCOMP_GUEST_PERM:
  	case ARCH_REQ_XCOMP_GUEST_PERM:
  		return fpu_xstate_prctl(option, arg2);
@@ -137,7 +151,7 @@ index 1949e25c7..1244e9720 100644
  	bool "Build execve tests" if !KUNIT_ALL_TESTS
  	depends on KUNIT=y
 diff --git a/fs/binfmt_elf.c b/fs/binfmt_elf.c
-index fb857faaf..bfa401453 100644
+index fb857faaf..fb3763b26 100644
 --- a/fs/binfmt_elf.c
 +++ b/fs/binfmt_elf.c
 @@ -51,6 +51,17 @@
@@ -158,7 +172,7 @@ index fb857faaf..bfa401453 100644
  #ifndef ELF_COMPAT
  #define ELF_COMPAT 0
  #endif
-@@ -830,6 +841,376 @@ static int parse_elf_properties(struct file *f, const struct elf_phdr *phdr,
+@@ -830,6 +841,431 @@ static int parse_elf_properties(struct file *f, const struct elf_phdr *phdr,
  	return ret == -ENOENT ? 0 : ret;
  }
  
@@ -172,6 +186,28 @@ index fb857faaf..bfa401453 100644
 +	return 1;
 +}
 +__setup("elf_sign_pub=", setup_elf_sign_pub);
++
++/*
++ * Take value 0, 1, 2, 3 
++ *  0: not check
++ *  1: only check the static, not check the userspace ld-linux reported, failed direct kill
++ *  2: full check, failed direct kill 
++ *  3: make security hook to decide how to handle signature verification failed
++ */
++unsigned long elf_sign_effect __ro_after_init = 0;
++static int __init setup_elf_sign_effect(char *str) {
++	if (kstrtoul(str, 0, &elf_sign_effect))
++		elf_sign_effect = 0;
++	else {
++		if (elf_sign_effect > 3)
++			elf_sign_effect = 0;
++	}
++
++	pr_info("elf_sign_effect = %lu\n", elf_sign_effect);
++
++	return 1;
++}
++__setup("elf_sign_effect=", setup_elf_sign_effect);
 +
 +extern struct key_type *key_type_lookup(const char *type);
 +extern void key_type_put(struct key_type *ktype);
@@ -515,16 +551,49 @@ index fb857faaf..bfa401453 100644
 +		if (elf_ppnt->p_type == PT_SIGN) {
 +			verify_status = verify_elf_signature(elf_file, elf_ppnt, verify_status);
 +			if (verify_status != ELF_SIGN_VERIFY_PASS) {
-+				pr_err("ELF binary verify signature failed 0x%x elf binary %pD\n", verify_status, elf_file);
-+				retval = security_bprm_elf_sign(elf_file, verify_status);
++				pr_debug("ELF binary verify signature failed 0x%x elf binary %pD\n", verify_status, elf_file);
++
++				switch (elf_sign_effect) {
++					case 0:
++						retval = 0;
++						break;
++					case 1:
++					case 2:
++						retval = -EPERM;
++						break;
++					case 3:
++						retval = security_bprm_elf_sign(elf_file, verify_status);
++						break;
++					default:
++						retval = -EINVAL;
++						break;
++				}
++
 +				break;
 +			} else
 +				break;
 +		} else
 +			continue;
 +
++	// No signature found
 +	if (verify_status == ELF_SIGN_NOT_VERIFIED || verify_status == ELF_SIGN_NOT_VERIFIED_INTERP) {
-+		retval = security_bprm_elf_sign(elf_file, verify_status);
++		pr_debug("ELF binary not have signature section %pD\n", elf_file);
++		
++		switch (elf_sign_effect) {
++			case 0:
++				retval = 0;
++				break;
++			case 1:
++			case 2:
++				retval = -EPERM;
++				break;
++			case 3:
++				retval = security_bprm_elf_sign(elf_file, verify_status);
++				break;
++			default:
++				retval = -EINVAL;
++				break;
++		}
 +	}
 +
 +	return retval;
@@ -535,7 +604,7 @@ index fb857faaf..bfa401453 100644
  static int load_elf_binary(struct linux_binprm *bprm)
  {
  	struct file *interpreter = NULL; /* to shut gcc up */
-@@ -871,6 +1252,12 @@ static int load_elf_binary(struct linux_binprm *bprm)
+@@ -871,6 +1307,12 @@ static int load_elf_binary(struct linux_binprm *bprm)
  	if (!elf_phdata)
  		goto out;
  
@@ -548,7 +617,7 @@ index fb857faaf..bfa401453 100644
  	elf_ppnt = elf_phdata;
  	for (i = 0; i < elf_ex->e_phnum; i++, elf_ppnt++) {
  		char *elf_interpreter;
-@@ -972,6 +1359,12 @@ static int load_elf_binary(struct linux_binprm *bprm)
+@@ -972,6 +1414,12 @@ static int load_elf_binary(struct linux_binprm *bprm)
  		if (!interp_elf_phdata)
  			goto out_free_dentry;
  
